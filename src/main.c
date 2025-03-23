@@ -3,11 +3,10 @@
 #include <string.h>
 #include <stdbool.h>
 
+#include <limits.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-
-#include "daemon.h"
-#include "nsh.h"
 
 #define DEFAULT_LISTEN_PORT 8888
 #define DEFAULT_MAX_LISTEN_CLIENTS 5
@@ -69,18 +68,20 @@ void handle_new_connections(int listen_fd)
 struct main_args
 {
     char* ip_add;
-    char* listen_port;
-    char* remote_port;
-    bool help, daemon;
-};
+    int listen_port, remote_port;
+    char* log_file;
+    char script_file[PATH_MAX];
+    bool help, daemon, verbose;
+} main_args = {0};
 
 void main_parse_args(int argc, char** argv)
 {
-    struct main_args args = {0};
+    int unnamed_arg = 0;
+    char* arg_value = 0;
+    int port_val = 0;
     for (int argi = 1; argi < argc; argi++)
     {
         char* arg = argv[argi];
-        char* arg_value = 0;
         if (*arg == '-')
         {
             // Deal with flags
@@ -88,36 +89,64 @@ void main_parse_args(int argc, char** argv)
             {
                 case 'h':
                     printf("Help\n");
-                    args.help = true;
+                    main_args.help = true;
                     break;
                 case 'i':
-                    if (argi+1 >= argc || *argv[argi+1] == '-') { printf("Missing value after %s flag\n", arg); break; }
-                    args.ip_add = argv[argi+1];
+                    if (argi+1 >= argc || *argv[argi+1] == '-') { fprintf(stderr, "Missing value after %s flag\n", arg); break; }
+                    main_args.ip_add = argv[argi+1];
                     arg_value = argv[++argi];
                     printf("ip address: %s\n", arg_value);
                     break;
                 case 'p':
-                    if (argi+1 >= argc || *argv[argi+1] == '-') { printf("Missing value after %s flag\n", arg); break; }
-                    args.listen_port = argv[argi+1];
+                    if (argi+1 >= argc || *argv[argi+1] == '-') { fprintf(stderr, "Missing value after %s flag\n", arg); break; }
                     arg_value = argv[++argi];
-                    printf("listening port: %s\n", arg_value);
+                    port_val = atoi(arg_value);
+                    if (port_val == 0 || port_val > 65535) { fprintf(stderr, "Invalid port number \"%s\" doesn't belong in range (0, 65536)\n", arg_value); break; }
+                    main_args.listen_port = port_val;
+                    printf("listening port: %d\n", port_val);
                     break;
                 case 'c':
-                    if (argi+1 >= argc || *argv[argi+1] == '-') { printf("Missing value after %s flag\n", arg); break; }
-                    args.remote_port = argv[argi+1];
+                    if (argi+1 >= argc || *argv[argi+1] == '-') { fprintf(stderr, "Missing value after %s flag\n", arg); break; }
                     arg_value = argv[++argi];
-                    printf("connection port: %s\n", arg_value);
+                    port_val = atoi(arg_value);
+                    if (port_val == 0 || port_val > 65535) { fprintf(stderr, "Invalid port number \"%s\" doesn't belong in range (0, 65536)\n", arg_value); break; }
+                    main_args.remote_port = port_val;
+                    printf("connection port: %d\n", port_val);
                     break;
                 case 'd':
                     printf("Daemon only, no interactive shell provided\n");
-                    nsh_daemon_process_create(true);
-                    args.daemon = true;
+                    main_args.daemon = true;
+                    break;
+                case 'v':
+                    printf("Verbose on\n");
+                    main_args.verbose = true;
+                    break;
+                case 'l':
+                    if (argi+1 >= argc || *argv[argi+1] == '-') { fprintf(stderr, "Missing value after %s flag\n", arg); break; }
+                    main_args.log_file = argv[argi+1];
+                    arg_value = argv[++argi];
+                    printf("connection port: %s\n", arg_value);
                     break;
             }
         }
         else
         {
-            printf("Encountered unknown arg: '%s', use - to prefix flags\n", arg);
+            if (unnamed_arg++ == 0)
+            {
+                struct stat stats;
+                realpath(argv[argi], main_args.script_file);
+                if (stat(main_args.script_file, &stats) == 0)
+                {
+                    if (S_ISREG(stats.st_mode)) fprintf(stderr, "Treating \"%s\" as a script file\n", main_args.script_file);
+                    else fprintf(stderr, "Script file \"%s\" is not a regular file\n", main_args.script_file);
+                }
+                else
+                {
+                    fprintf(stderr, "Script file \"%s\" doesn't exist or cannot access\n", main_args.script_file);
+                    memset(main_args.script_file, 0, PATH_MAX);
+                }
+            }
+            else fprintf(stderr, "Encountered unknown arg: '%s', use - to prefix flags\n", arg);
         }
     }
 }

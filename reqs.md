@@ -26,9 +26,8 @@ Deadline: 9. cvicenie - tbd - TODO
 - quit - ukoncenie spojenia z ktoreho prikaz prisiel
 - halt - ukoncenie celeho programu ??
 
-
 # Flow
-- flag -s (implicit) = shell acts as a server; waits for stdin or socket if other flags specified
+- flag -s (implicit) = shell acts as a server and waits for connection
 - flag -c (explicit) = shell acts as an intermediary and
 
 # Minimum capabilities
@@ -60,9 +59,9 @@ sokety, spojenia // thanks for being specific yet again
 | Id | Points | Text |
 |-|-|-|
 | 1. | 2 | Non-interactive mode: Use files as scripts 
-| 3. | 3 | nterný príkaz stat vypíše zoznam všetkých aktuálnych spojení na ktorých prijíma príkazy, prípadne aj všetky sokety na ktorých prijíma nové spojenia.
-| 4. | 2 | Interný príkaz abort n ukončí zadané spojenie.
-| 5. | 4 | Interné príkazy listen a close (s príslušnými argumentami) pre otvorenie a zatvorenie soketu pre prijímanie spojení.
 | 7. | 2 | S prepínačom "-i" bude možné zadať aj IP adresu na ktorej bude program očakávať spojenia (nielen port).
-| 8. | 3 | Prepínače "-i", "-p" bude možné zadať aj opakovane (viacnásobne pri
-jednom spustení), teda spojenia sa budú napríklad prijímať na viacerých portoch, alebo viacerých lokálnych soketoch.
+| 9. | 3 | Konfigurovateľný tvar promptu, interný príkaz prompt.
+| 14. | 1 | S prepínačom "-v" sa budú zobrazovať pomocné (debugg-ovacie) výpisy na štandardný chybový výstup (stderr).
+| 17. | 4 | Program s prepínačom "-d" sa bude správať ako démon (neobsadí terminál), nebude používať štandardný vstup a výstup.
+| 18. | 2 | Program s prepínačom "-l" a menom súboru bude do neho zapisovať záznamy o vykonávaní príkazov (log-y).
+| 21. | 2 | Funkčný Makefile.
