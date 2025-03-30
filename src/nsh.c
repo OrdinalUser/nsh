@@ -191,12 +191,12 @@ err_code_e nsh_internal_accept(nsh_conn_t* connection)
 {
     socklen_t client_length = sizeof(connection->network.remote);
     int sock_fd = accept(connection->fd_read, (struct sockaddr*)&connection->network.remote, &client_length);
-    if (sock_fd < 0) { ERROR_LOG("[Error]: Failed to accept new connection %d\n", connection->id); return CODE_ACCEPT; }
-    if (close(connection->fd_read)) { ERROR_LOG("[Error]: Failed to close socket when promoting connection %d\n", connection->id); return CODE_CLOSE; } // fd_write should be the same since we promoted the listening socket to well another listening sockete
+    if (sock_fd < 0) { ERROR_LOG("[Error]: Failed to accept new connection at %d\n", connection->id); return CODE_ACCEPT; }
+    if (close(connection->fd_read)) { ERROR_LOG("[Error]: Failed to close socket when promoting connection at %d\n", connection->id); return CODE_CLOSE; } // fd_write should be the same since we promoted the listening socket to well another listening sockete
     connection->state = STATE_ACTIVE;
     connection->fd_write = sock_fd;
     connection->fd_read = sock_fd;
-    VERBOSE_LOG("[Log]: Accepted connection %d\n", connection->id);
+    VERBOSE_LOG("[Log]: Accepted connection at %d\n", connection->id);
     return CODE_OK;
 }
 
@@ -484,8 +484,8 @@ err_code_e nsh_interpret(nsh_conn_t* connection)
     // Reset this connection if the client already closed on us
     if (readBytes == 0)
     {
-        VERBOSE_LOG("[Notice]: Client disconnected on %d\n", connection->id);
-        return nsh_internal_abort_connection(connection);
+        VERBOSE_LOG("[Notice]: Read 0 bytes from connection %d\n", connection->id);
+        return CODE_OK;
     }
 
     ssize_t writtenBytes;
@@ -511,7 +511,7 @@ int nsh_server()
             const nsh_conn_t* conn = array_at(&g_connections.array, i);
             struct pollfd* pfd = array_index(&poll_fds, i);
             pfd->fd = conn->fd_read;
-            pfd->events = POLLIN;
+            pfd->events = POLLIN | POLLHUP | POLLERR | POLLNVAL;
             pfd->revents = 0;
             poll_fds.length++;
         }
@@ -520,10 +520,26 @@ int nsh_server()
         for (size_t i = 0; i < poll_fds.length; i++)
         {
             struct pollfd* pfd = array_at(&poll_fds, i);
+            nsh_conn_t* conn = array_find_first(&g_connections.array, (array_find_func)find_connection_by_fd, &pfd->fd);
             printf("fd %d | events %d | revents %d\n", pfd->fd, pfd->events, pfd->revents); // DEBUG
-            if (pfd->revents & POLLIN)
+            
+            if (pfd->revents & POLLNVAL)
             {
-                nsh_conn_t* conn = array_find_first(&g_connections.array, (array_find_func)find_connection_by_fd, &pfd->fd);
+                ERROR_LOG("[Error]: Invalid file descriptor on %d", conn->id);
+            }
+            else if (pfd->revents & POLLERR)
+            {
+                ERROR_LOG("[Poll]: Straight up POLLERR, what the fuck do I do? - conn %d\n", conn->id);
+                nsh_internal_abort_connection(conn);
+            }
+            else if (pfd->revents & POLLHUP)
+            {
+                VERBOSE_LOG("[Notice]: Client disconnected from %d\n", conn->id);
+                nsh_internal_abort_connection(conn);
+            }
+            else if (pfd->revents & POLLIN)
+            {
+
                 if (conn->state == STATE_ACTIVE)
                 {
                     err_code_e err = nsh_interpret(conn);
@@ -535,6 +551,10 @@ int nsh_server()
                     if (err != CODE_OK) { ERROR_LOG("[Interpret Error]: %d\n", err); continue; }
                 }
                 conn->last_active = time(0);
+            }
+            else if (pfd->revents)
+            {
+                ERROR_LOG("[Poll]: Something happened and it was not processed.. hmm - %d\n", pfd->revents);
             }
         }
     }
