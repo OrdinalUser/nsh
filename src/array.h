@@ -23,6 +23,7 @@ bool array_pop(array_t* array, void* element);
 
 void* array_at(array_t* array, size_t index);
 void* array_index(array_t* array, size_t index);
+size_t array_ptr_index(array_t* array, void* element);
 
 void array_delete(array_t* array, size_t index);
 void array_clear(array_t* array);

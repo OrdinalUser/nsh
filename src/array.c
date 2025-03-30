@@ -50,6 +50,12 @@ void* array_index(array_t* array, size_t index)
     return (unsigned char*)array->base + array->element_size * index;
 }
 
+size_t array_ptr_index(array_t* array, void* element)
+{
+    size_t ptr_diff = (size_t) element - (size_t)array->base;
+    return ptr_diff / array->element_size;
+}
+
 void array_delete(array_t* array, size_t index)
 {
     if (index >= array->length) return;

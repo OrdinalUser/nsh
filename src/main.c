@@ -69,5 +69,6 @@ void handle_new_connections(int listen_fd)
 int main(int argc, char** argv, char** envp)
 {
     nsh(argc, argv);
+    atexit(nsh_atexit);
     return 0;
 }
