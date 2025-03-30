@@ -44,7 +44,7 @@ typedef struct NshConnection
     
 } nsh_conn_t;
 
-void nsh_atexit();
+void nsh_exit();
 int nsh(int argc, char** argv);
 
 #endif

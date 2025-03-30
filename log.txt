@@ -1,0 +1,10 @@
+[State]: Set log file to "log.txt"
+[Internal]: Initialized network socket 127.0.0.1:8888
+[Log]: Accepted connection 0
+[Log]: Interpreting commands on connection 0
+[Internal]: Aborted connection 0
+[Internal]: Initialized network socket 127.0.0.1:8888
+[Log]: Accepted connection 0
+[Log]: Interpreting commands on connection 0
+[Internal]: Aborted connection 0
+[Internal]: Initialized network socket 127.0.0.1:8888

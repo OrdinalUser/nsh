@@ -16,6 +16,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 
+/* Initial config */
 #define NSH_INITIAL_MAX_CONNECTIONS 8
 #define NSH_INITIAL_TIMEOUT 60
 #define NSH_INITIAL_PORT 8888
@@ -24,14 +25,49 @@ const char* NSH_INITIAL_IP_ADDRESS = "127.0.0.1";
 #define BUFFER_SIZE 65536
 char BUFFER[BUFFER_SIZE];
 
+/* Lookups */
+const char* NSH_CONNECTION_TYPE_STR[] = {
+    "CONSOLE", "NETWORK", "DOMAIN"
+};
+
+/* Types */
 typedef enum ERROR_CODE
 {
     CODE_OK = 0,
     CODE_INVALID_FILE,
-    CODE_BIND_ERROR, CODE_LISTEN_ERROR, CODE_SOCKET_ERROR, CODE_SHUTDOWN, CODE_CLOSE,
+    CODE_BIND_ERROR, CODE_LISTEN_ERROR, CODE_SOCKET_ERROR, CODE_SHUTDOWN, CODE_CLOSE, CODE_ACCEPT,
     CODE_WTF
 } err_code_e;
 
+/* Globals */
+static struct {
+    array_t array;
+    size_t next_id;
+} g_connections = {0};
+
+static nsh_conn_t* g_client_connection = NULL;
+static bool g_running = true;
+
+static struct nsh_args
+{
+    char* ip_address;
+    int port;
+    char script_file[PATH_MAX];
+    char* log_file;
+    char* domain_sock_path;
+    int timeout;
+    bool help, verbose, client, server;
+    bool network, force_terminal;
+} g_args = {0};
+
+/* Logging macros */
+#define VERBOSE_LOG(format, ...) \
+    do { if(g_args.verbose) {fprintf(stderr, format, ##__VA_ARGS__); fflush(stderr); }} while (0)
+
+#define ERROR_LOG(format, ...) \
+    do { fprintf(stderr, format, ##__VA_ARGS__); fflush(stderr); } while (0)
+
+/* Helper functions for g_connections.array */
 bool find_connection_by_fd(nsh_conn_t* connection, int* fd)
 {
     return connection->fd_read == *fd;
@@ -42,251 +78,29 @@ bool find_connection_by_id(nsh_conn_t* conn, int* id)
     return conn->id == *id;
 }
 
-static array_t g_connections;
-static int g_next_id = 0;
-static nsh_conn_t* g_client_connection = NULL;
-
-static bool g_running = true;
-
-const char* NSH_CONNECTION_TYPE_STR[] = {
-    "CONSOLE", "NETWORK", "DOMAIN"
-};
-
-#define VERBOSE_LOG(format, ...) \
-    do { if(main_args.verbose) {fprintf(stderr, format, ##__VA_ARGS__); fflush(stderr); }} while (0)
-
-#define ERROR_LOG(format, ...) \
-    do { fprintf(stderr, format, ##__VA_ARGS__); fflush(stderr); } while (0)
-
-struct main_args
-{
-    char* ip_address;
-    int port;
-    char script_file[PATH_MAX];
-    char* log_file;
-    char* domain_sock_path;
-    int timeout;
-    bool help, verbose, client, server;
-    bool network, force_terminal;
-} main_args = {0};
-
-void nsh_atexit()
-{
-    static bool cleanup = false;
-    if (cleanup) { ERROR_LOG("[Error]: Called cleanup multiple times!\n"); return; }
-    for (size_t i = 0; i < g_connections.length; i++)
-    {
-        nsh_conn_t* conn = array_at(&g_connections, i);
-        if (conn->type == CONSOLE) continue;
-        shutdown(conn->fd_read, SHUT_RDWR);
-        close(conn->fd_read);
-        if (conn->fd_read != conn->fd_write) { shutdown(conn->fd_read, SHUT_RDWR); close(conn->fd_write); }
-        if (main_args.server && conn->type == DOMAIN) unlink(conn->domain.path);
-    }
-    free(g_client_connection);
-    cleanup = true;
-}
-
-void nsh_exit(int code)
-{
-    nsh_atexit();
-    exit(code);
-}
-
-void nsh_parse_args(int argc, char** argv)
-{
-    main_args.server = true;
-    main_args.timeout = NSH_INITIAL_TIMEOUT;
-    main_args.port = NSH_INITIAL_PORT;
-    main_args.ip_address = (char*)NSH_INITIAL_IP_ADDRESS;
-
-    int unnamed_arg = 0;
-    char* arg_value = 0;
-    int port_val = 0;
-    int timeout_val = 0;
-
-    for (int argi = 0; argi < argc; argi++)
-    {
-        char* arg = argv[argi];
-        if (*arg == '-')
-        {
-            // Deal with flags
-            switch(*(arg+1))
-            {
-                case 'h':
-                    printf("Help\n");
-                    main_args.help = true;
-                    break;
-                case 'i':
-                    if (argi+1 >= argc || *argv[argi+1] == '-') { fprintf(stderr, "Missing value after %s flag\n", arg); break; }
-                    main_args.ip_address = argv[argi+1];
-                    arg_value = argv[++argi];
-                    printf("ip address: %s\n", arg_value);
-                    main_args.network = true;
-                    break;
-                case 'p':
-                    if (argi+1 >= argc || *argv[argi+1] == '-') { fprintf(stderr, "Missing value after %s flag\n", arg); break; }
-                    arg_value = argv[++argi];
-                    port_val = atoi(arg_value);
-                    if (port_val == 0 || port_val > 65535) { fprintf(stderr, "Invalid port number \"%s\" doesn't belong in range (0, 65536)\n", arg_value); break; }
-                    main_args.port = port_val;
-                    main_args.network = true;
-                    printf("listening network port: %d\n", port_val);
-                    break;
-                case 'c':
-                    main_args.server = false;
-                    main_args.client = true;
-                    main_args.network = true;
-                    printf("client mode set\n");
-                    break;
-                case 's':
-                    main_args.server = true;
-                    main_args.client = false;
-                    main_args.network = true;
-                    printf("explicit server mode\n");
-                    break;
-                case 'v':
-                    printf("Verbose on\n");
-                    main_args.verbose = true;
-                    break;
-                case 'l':
-                    if (argi+1 >= argc || *argv[argi+1] == '-') { fprintf(stderr, "Missing value after %s flag\n", arg); break; }
-                    main_args.log_file = argv[argi+1];
-                    arg_value = argv[++argi];
-                    printf("log file: %s\n", arg_value);
-                    break;
-                case 'u':
-                    if (argi+1 >= argc || *argv[argi+1] == '-') { fprintf(stderr, "Missing value after %s flag\n", arg); break; }
-                    arg_value = argv[++argi];
-                    main_args.domain_sock_path = arg_value;
-                    printf("domain socket: %s\n", main_args.domain_sock_path);
-                    break;
-                case 't':
-                    if (argi+1 >= argc || *argv[argi+1] == '-') { fprintf(stderr, "Missing value after %s flag\n", arg); break; }
-                    arg_value = argv[++argi];
-                    timeout_val = atoi(arg_value);
-                    if (timeout_val <= 0) { fprintf(stderr, "Invalid timeout value \"%s\" in seconds\n", arg_value); break; }
-                    main_args.timeout = atoi(arg_value);
-                    printf("timeout set to: %d seconds\n", main_args.timeout);
-                    break;
-                case 'T':
-                    main_args.force_terminal = true;
-                    break;
-            }
-        }
-        else
-        {
-            if (unnamed_arg++ == 0)
-            {
-                struct stat stats;
-                realpath(argv[argi], main_args.script_file);
-                if (stat(main_args.script_file, &stats) == 0)
-                {
-                    if (S_ISREG(stats.st_mode)) fprintf(stderr, "Treating \"%s\" as a script file\n", main_args.script_file);
-                    else fprintf(stderr, "Script file \"%s\" is not a regular file\n", main_args.script_file);
-                }
-                else
-                {
-                    fprintf(stderr, "Script file \"%s\" doesn't exist or cannot access\n", main_args.script_file);
-                    memset(main_args.script_file, 0, PATH_MAX);
-                }
-            }
-            else fprintf(stderr, "Encountered unknown arg: '%s', use - to prefix flags\n", arg);
-        }
-    }
-}
-
-void nsh_print_help()
+/* Internal commands */
+void nsh_internal_help()
 {
     printf("Network SHell\n> Author: Tomas Tytykalo\n> Good luck using this :/\n");
 }
 
-int nsh_evaluate_client()
-{
-    VERBOSE_LOG("[State]: Client mode\n");
-    g_client_connection = calloc(1, sizeof(nsh_conn_t));
-
-    if (main_args.log_file)
-    {
-        FILE* flog = fopen(main_args.log_file, "w+");
-        if (!flog)
-        {
-            fprintf(stderr, "[Error]: Couldn't open file \"%s\" for logging purposes\n", main_args.log_file);
-            nsh_exit(CODE_INVALID_FILE);
-        }
-        fclose(flog);
-        freopen(main_args.log_file, "w+", stderr);
-        VERBOSE_LOG("[State]: Set log file to \"%s\"\n", main_args.log_file);
-    }
-    if (main_args.help) { nsh_print_help(); nsh_exit(CODE_OK); }
-
-    if (main_args.domain_sock_path)
-    {
-        g_client_connection->type = DOMAIN;
-        int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-        g_client_connection->domain.addr.sun_family = AF_UNIX;
-        strcpy(g_client_connection->domain.addr.sun_path, main_args.domain_sock_path);
-        strcpy(g_client_connection->domain.path, main_args.domain_sock_path);
-        
-        if (connect(sock_fd, (struct sockaddr*)&g_client_connection->domain.addr, sizeof(g_client_connection->domain.addr)) == -1)
-        {
-            close(sock_fd);
-            ERROR_LOG("[Error]: Failed to bind domain socket \"%s\"\n", main_args.domain_sock_path);
-            nsh_exit(CODE_BIND_ERROR);
-        }
-        g_client_connection->fd_read = sock_fd;
-        g_client_connection->fd_write = sock_fd;
-
-        VERBOSE_LOG("[Connection]: Opened domain socket \"%s\"\n", main_args.domain_sock_path);
-    }
-    else if (main_args.network)
-    {
-        g_client_connection->type = NETWORK;
-        int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock_fd < 0) { ERROR_LOG("[Error]: Failed to create internet socket\n"); nsh_exit(CODE_SOCKET_ERROR); }
-        
-        g_client_connection->network.remote.sin_family = AF_INET;
-        g_client_connection->network.remote.sin_port = htons(main_args.port);
-        inet_pton(AF_INET, main_args.ip_address, &g_client_connection->network.remote.sin_addr);
-
-        if (connect(sock_fd, (struct sockaddr*)&g_client_connection->network.remote, sizeof(g_client_connection->network.remote)) < 0)
-        { 
-            close(sock_fd);
-            ERROR_LOG("[Error]: Failed to connect to %s:%d\n", main_args.ip_address, main_args.port);
-            nsh_exit(CODE_BIND_ERROR);
-        }
-
-        g_client_connection->fd_read = sock_fd;
-        g_client_connection->fd_write = sock_fd;
-
-        VERBOSE_LOG("[Connection]: Opened network socket %s:%d\n", main_args.ip_address, main_args.port);
-    }
-    else
-    {
-        ERROR_LOG("[Notice]: You cannot be a client to your own terminal.. how did this even happen?\n");
-        nsh_exit(CODE_WTF);
-    }
-
-    return CODE_OK;
-}
-
 // Doesn't check for duplicates!
-err_code_e nsh_connection_add_console(nsh_conn_t* conn)
+// conn->id MUST BE SET!!
+err_code_e nsh_internal_init_console(nsh_conn_t* conn)
 {
-    conn->id = g_next_id++;
     conn->type = CONSOLE;
     conn->state = STATE_ACTIVE;
     conn->fd_read = fileno(stdin);
     conn->fd_write = fileno(stdout);
     
-    VERBOSE_LOG("[Connection]: Opened terminal as connection\n");
+    VERBOSE_LOG("[Internal]: Initialized terminal as a connection\n");
     return CODE_OK;    
 }
 
-err_code_e nsh_connection_add_network(char* interface_ip, int port, nsh_conn_t* conn)
+err_code_e nsh_internal_init_network(char* interface_ip, int port, nsh_conn_t* conn)
 {
-    conn->id = g_next_id++;
     conn->type = NETWORK;
+    memset(&conn->network.remote, 0, sizeof(struct sockaddr_in));
 
     int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (sock_fd < 0) { ERROR_LOG("[Error]: Failed to create internet socket\n"); return CODE_SOCKET_ERROR; }
@@ -312,112 +126,98 @@ err_code_e nsh_connection_add_network(char* interface_ip, int port, nsh_conn_t* 
     conn->fd_read = sock_fd;
     conn->fd_write = sock_fd;
 
-    VERBOSE_LOG("[Connection]: Opened network socket %s:%d\n", interface_ip, port);
+    VERBOSE_LOG("[Internal]: Initialized network socket %s:%d\n", interface_ip, port);
     return CODE_OK;
 }
 
-err_code_e nsh_connection_add_domain(char* path, nsh_conn_t* conn)
+err_code_e nsh_internal_init_domain(char* path, nsh_conn_t* conn)
 {
-    conn->id = g_next_id++;
     conn->type = DOMAIN;
 
     int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock_fd < 0) { ERROR_LOG("[Error]: Failed to create domain socket\n"); return CODE_SOCKET_ERROR; }
 
     conn->domain.addr.sun_family = AF_UNIX;
-    strcpy(conn->domain.addr.sun_path, main_args.domain_sock_path);
-    strcpy(conn->domain.path, main_args.domain_sock_path);
-    unlink(main_args.domain_sock_path);
+    strcpy(conn->domain.addr.sun_path, g_args.domain_sock_path);
+    strcpy(conn->domain.path, g_args.domain_sock_path);
+    unlink(g_args.domain_sock_path);
 
     if (bind(sock_fd, (struct sockaddr*)&conn->domain.addr, sizeof(conn->domain.addr)) == -1)
     {
         close(sock_fd);
-        ERROR_LOG("[Error]: Failed to bind domain socket \"%s\"\n", main_args.domain_sock_path);
+        ERROR_LOG("[Error]: Failed to bind domain socket \"%s\"\n", g_args.domain_sock_path);
         return CODE_BIND_ERROR;
     }
     if (listen(sock_fd, 1) < 0)
     {
         close(sock_fd);
-        ERROR_LOG("[Error]: Failed to listen at bound domain socket %s:%d\n", main_args.ip_address, main_args.port);
+        ERROR_LOG("[Error]: Failed to listen at bound domain socket %s:%d\n", g_args.ip_address, g_args.port);
         return CODE_LISTEN_ERROR;
     }
 
     conn->fd_read = sock_fd;
     conn->fd_write = sock_fd;
 
-    VERBOSE_LOG("[Connection]: Opened domain socket \"%s\"\n", main_args.domain_sock_path);
+    VERBOSE_LOG("[Internal]: Initialized domain socket \"%s\"\n", g_args.domain_sock_path);
     return CODE_OK;
 }
 
-err_code_e nsh_connection_abort(int conn_id)
+err_code_e nsh_internal_abort_connection(nsh_conn_t* conn)
 {
-    nsh_conn_t* conn = array_find_first(&g_connections, (array_find_func)find_connection_by_id, &conn_id);
-    if (!conn) { VERBOSE_LOG("[Command]: Trying to abort nonexistant connection %d\n", conn_id); return CODE_OK; }
-    if (conn->type == CONSOLE) { VERBOSE_LOG("[Command]: Trying to abort CONSOLE connection, you can only close it\n"); return CODE_OK; }
+    if (conn->type == CONSOLE) { VERBOSE_LOG("[Notice]: Trying to abort CONSOLE connection, you can only close it\n"); return CODE_OK; }
     
-    if (shutdown(conn->fd_read, SHUT_RDWR)) { ERROR_LOG("[Error]: Failed to shutdown connection ID %d\n", conn->id); return CODE_SHUTDOWN; }
-    if (close(conn->fd_read)) { ERROR_LOG("[Error]: Failed to close connection ID %d\n", conn->id); return CODE_CLOSE; }
+    if (shutdown(conn->fd_read, SHUT_RDWR)) { ERROR_LOG("[Error]: Failed to shutdown connection %d\n", conn->id); return CODE_SHUTDOWN; }
+    if (close(conn->fd_read)) { ERROR_LOG("[Error]: Failed to close connection %d\n", conn->id); return CODE_CLOSE; }
+    VERBOSE_LOG("[Internal]: Aborted connection %d\n", conn->id);
     
-    //size_t conn_index = array_ptr_index(&g_connections, conn);
+    err_code_e err = CODE_OK;
     conn->state = STATE_INACTIVE;
+    if (conn->type == NETWORK)
+    {
+        char ip[INET_ADDRSTRLEN]; inet_ntop(AF_INET, &conn->network.local.sin_addr, ip, INET_ADDRSTRLEN);
+        int port = ntohs(conn->network.local.sin_port);
+        err = nsh_internal_init_network(ip, port, conn);
+    }
+    else if (conn->type == DOMAIN)
+    {
+        char path[PATH_MAX]; strcpy(path, conn->domain.path);
+        err = nsh_internal_init_domain(path, conn);
+    }
 
-    return CODE_OK;
+    return err;
 }
 
-int nsh_evaluate_server()
+err_code_e nsh_internal_accept(nsh_conn_t* connection)
 {
-    VERBOSE_LOG("[State]: Server mode\n");
-
-    if (main_args.log_file)
-    {
-        FILE* flog = fopen(main_args.log_file, "w+");
-        if (!flog)
-        {
-            fprintf(stderr, "[Error]: Couldn't open file \"%s\" for logging purposes\n", main_args.log_file);
-            nsh_exit(CODE_INVALID_FILE);
-        }
-        fclose(flog);
-        freopen(main_args.log_file, "w+", stderr);
-        VERBOSE_LOG("[State]: Set log file to \"%s\"\n", main_args.log_file);
-    }
-    if (main_args.help) { nsh_print_help(); nsh_exit(CODE_OK); }
-
-    // Prepare the server
-    if (main_args.domain_sock_path)
-    {
-        nsh_conn_t conn = {0};
-        err_code_e err = nsh_connection_add_domain(main_args.domain_sock_path, &conn);
-        if (err != CODE_OK) nsh_exit(err);
-        array_push(&g_connections, &conn);
-    }
-    if (main_args.network)
-    {
-        nsh_conn_t conn = {0};
-        err_code_e err = nsh_connection_add_network(main_args.ip_address, main_args.port, &conn);
-        if (err != CODE_OK) nsh_exit(err);
-        array_push(&g_connections, &conn);
-    }
-    if (main_args.force_terminal || g_connections.length == 0)
-    {
-        nsh_conn_t conn = {0};
-        nsh_connection_add_console(&conn);
-        VERBOSE_LOG("[Connection]: Using terminal as connection\n");
-        array_push(&g_connections, &conn);
-    }
-
+    socklen_t client_length = sizeof(connection->network.remote);
+    int sock_fd = accept(connection->fd_read, (struct sockaddr*)&connection->network.remote, &client_length);
+    if (sock_fd < 0) { ERROR_LOG("[Error]: Failed to accept new connection %d\n", connection->id); return CODE_ACCEPT; }
+    if (close(connection->fd_read)) { ERROR_LOG("[Error]: Failed to close socket when promoting connection %d\n", connection->id); return CODE_CLOSE; } // fd_write should be the same since we promoted the listening socket to well another listening sockete
+    connection->state = STATE_ACTIVE;
+    connection->fd_write = sock_fd;
+    connection->fd_read = sock_fd;
+    VERBOSE_LOG("[Log]: Accepted connection %d\n", connection->id);
     return CODE_OK;
 }
 
-void nsh_cmd_stat()
+/* Commands exposed to the interpreter */
+err_code_e nsh_command_abort(int conn_id)
+{
+    nsh_conn_t* conn = array_find_first(&g_connections.array, (array_find_func)find_connection_by_id, &conn_id);
+    if (!conn) { VERBOSE_LOG("[Command]: Trying to abort nonexistant connection %d\n", conn_id); return CODE_OK; }
+    return nsh_internal_abort_connection(conn);
+}
+
+err_code_e nsh_command_stat()
 {
     char fd_read_buff[32], fd_write_buff[32];
 
     printf("|=== NSH : Stat =========================================================|\n");
     printf("| ID  | State  | Type    | From                  | To                    |\n");
     printf("|-----|--------|---------|-----------------------|-----------------------|\n");
-    for (size_t i = 0; i < g_connections.length; i++)
+    for (size_t i = 0; i < g_connections.array.length; i++)
     {
-        nsh_conn_t* conn = array_at(&g_connections, i);
+        nsh_conn_t* conn = array_at(&g_connections.array, i);
         const char* conn_type_str = NSH_CONNECTION_TYPE_STR[conn->type];
         const char* fd_read_name, *fd_write_name;
         const char* state_str = conn->state == STATE_INACTIVE ? "Idle" : "Active";
@@ -436,8 +236,8 @@ void nsh_cmd_stat()
             sprintf(fd_read_buff+strlen(fd_read_buff), ":%d", ntohs(conn->network.local.sin_port));
             inet_ntop(AF_INET, &conn->network.remote.sin_addr, fd_write_buff, INET_ADDRSTRLEN);
             sprintf(fd_write_buff+strlen(fd_write_buff), ":%d", ntohs(conn->network.remote.sin_port));
-            fd_read_name = fd_read_buff;
-            fd_write_name = fd_write_buff;
+            fd_read_name = fd_write_buff    ;
+            fd_write_name = fd_read_buff;
         }
         else if (conn->type == DOMAIN)
         {
@@ -453,41 +253,245 @@ void nsh_cmd_stat()
         printf("| %-3.3d | %-6.6s | %-7.7s | %-21.21s | %-21.21s |\n", conn->id, state_str, conn_type_str, fd_read_name, fd_write_name);
     }
     printf("|========================================================================|\n");
-}
-
-int nsh_init(int argc, char** argv)
-{
-    static bool initialized = false;
-    if (initialized) return CODE_OK;
-
-    array_create(&g_connections, NSH_INITIAL_MAX_CONNECTIONS, sizeof(nsh_conn_t));
-
-    nsh_parse_args(argc, argv);
     return CODE_OK;
 }
 
-void nsh_interpret(nsh_conn_t* connection)
+/* Argument parsing and state preparation */
+void nsh_parse_args(int argc, char** argv)
 {
-    VERBOSE_LOG("[Log]: Interpreting commands on connection ID %d\n", connection->id);
+    g_args.server = true;
+    g_args.timeout = NSH_INITIAL_TIMEOUT;
+    g_args.port = NSH_INITIAL_PORT;
+    g_args.ip_address = (char*)NSH_INITIAL_IP_ADDRESS;
+
+    int unnamed_arg = 0;
+    char* arg_value = 0;
+    int port_val = 0;
+    int timeout_val = 0;
+
+    for (int argi = 0; argi < argc; argi++)
+    {
+        char* arg = argv[argi];
+        if (*arg == '-')
+        {
+            // Deal with flags
+            switch(*(arg+1))
+            {
+                case 'h':
+                    printf("Help\n");
+                    g_args.help = true;
+                    break;
+                case 'i':
+                    if (argi+1 >= argc || *argv[argi+1] == '-') { fprintf(stderr, "Missing value after %s flag\n", arg); break; }
+                    g_args.ip_address = argv[argi+1];
+                    arg_value = argv[++argi];
+                    printf("ip address: %s\n", arg_value);
+                    g_args.network = true;
+                    break;
+                case 'p':
+                    if (argi+1 >= argc || *argv[argi+1] == '-') { fprintf(stderr, "Missing value after %s flag\n", arg); break; }
+                    arg_value = argv[++argi];
+                    port_val = atoi(arg_value);
+                    if (port_val == 0 || port_val > 65535) { fprintf(stderr, "Invalid port number \"%s\" doesn't belong in range (0, 65536)\n", arg_value); break; }
+                    g_args.port = port_val;
+                    g_args.network = true;
+                    printf("listening network port: %d\n", port_val);
+                    break;
+                case 'c':
+                    g_args.server = false;
+                    g_args.client = true;
+                    g_args.network = true;
+                    printf("client mode set\n");
+                    break;
+                case 's':
+                    g_args.server = true;
+                    g_args.client = false;
+                    g_args.network = true;
+                    printf("explicit server mode\n");
+                    break;
+                case 'v':
+                    printf("Verbose on\n");
+                    g_args.verbose = true;
+                    break;
+                case 'l':
+                    if (argi+1 >= argc || *argv[argi+1] == '-') { fprintf(stderr, "Missing value after %s flag\n", arg); break; }
+                    g_args.log_file = argv[argi+1];
+                    arg_value = argv[++argi];
+                    printf("log file: %s\n", arg_value);
+                    break;
+                case 'u':
+                    if (argi+1 >= argc || *argv[argi+1] == '-') { fprintf(stderr, "Missing value after %s flag\n", arg); break; }
+                    arg_value = argv[++argi];
+                    g_args.domain_sock_path = arg_value;
+                    printf("domain socket: %s\n", g_args.domain_sock_path);
+                    break;
+                case 't':
+                    if (argi+1 >= argc || *argv[argi+1] == '-') { fprintf(stderr, "Missing value after %s flag\n", arg); break; }
+                    arg_value = argv[++argi];
+                    timeout_val = atoi(arg_value);
+                    if (timeout_val <= 0) { fprintf(stderr, "Invalid timeout value \"%s\" in seconds\n", arg_value); break; }
+                    g_args.timeout = atoi(arg_value);
+                    printf("timeout set to: %d seconds\n", g_args.timeout);
+                    break;
+                case 'T':
+                    g_args.force_terminal = true;
+                    break;
+            }
+        }
+        else
+        {
+            if (unnamed_arg++ == 0)
+            {
+                struct stat stats;
+                realpath(argv[argi], g_args.script_file);
+                if (stat(g_args.script_file, &stats) == 0)
+                {
+                    if (S_ISREG(stats.st_mode)) fprintf(stderr, "Treating \"%s\" as a script file\n", g_args.script_file);
+                    else fprintf(stderr, "Script file \"%s\" is not a regular file\n", g_args.script_file);
+                }
+                else
+                {
+                    fprintf(stderr, "Script file \"%s\" doesn't exist or cannot access\n", g_args.script_file);
+                    memset(g_args.script_file, 0, PATH_MAX);
+                }
+            }
+            else fprintf(stderr, "Encountered unknown arg: '%s', use - to prefix flags\n", arg);
+        }
+    }
+}
+
+int nsh_evaluate_client()
+{
+    VERBOSE_LOG("[State]: Client mode\n");
+    g_client_connection = calloc(1, sizeof(nsh_conn_t));
+
+    if (g_args.log_file)
+    {
+        FILE* flog = fopen(g_args.log_file, "w+");
+        if (!flog)
+        {
+            fprintf(stderr, "[Error]: Couldn't open file \"%s\" for logging purposes\n", g_args.log_file);
+            nsh_exit(CODE_INVALID_FILE);
+        }
+        fclose(flog);
+        freopen(g_args.log_file, "w+", stderr);
+        VERBOSE_LOG("[State]: Set log file to \"%s\"\n", g_args.log_file);
+    }
+    if (g_args.help) { nsh_internal_help(); nsh_exit(CODE_OK); }
+
+    if (g_args.domain_sock_path)
+    {
+        g_client_connection->type = DOMAIN;
+        int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        g_client_connection->domain.addr.sun_family = AF_UNIX;
+        strcpy(g_client_connection->domain.addr.sun_path, g_args.domain_sock_path);
+        strcpy(g_client_connection->domain.path, g_args.domain_sock_path);
+        
+        if (connect(sock_fd, (struct sockaddr*)&g_client_connection->domain.addr, sizeof(g_client_connection->domain.addr)) == -1)
+        {
+            close(sock_fd);
+            ERROR_LOG("[Error]: Failed to bind domain socket \"%s\"\n", g_args.domain_sock_path);
+            nsh_exit(CODE_BIND_ERROR);
+        }
+        g_client_connection->fd_read = sock_fd;
+        g_client_connection->fd_write = sock_fd;
+
+        VERBOSE_LOG("[Connection]: Opened domain socket \"%s\"\n", g_args.domain_sock_path);
+    }
+    else if (g_args.network)
+    {
+        g_client_connection->type = NETWORK;
+        int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock_fd < 0) { ERROR_LOG("[Error]: Failed to create internet socket\n"); nsh_exit(CODE_SOCKET_ERROR); }
+        
+        g_client_connection->network.remote.sin_family = AF_INET;
+        g_client_connection->network.remote.sin_port = htons(g_args.port);
+        inet_pton(AF_INET, g_args.ip_address, &g_client_connection->network.remote.sin_addr);
+
+        if (connect(sock_fd, (struct sockaddr*)&g_client_connection->network.remote, sizeof(g_client_connection->network.remote)) < 0)
+        { 
+            close(sock_fd);
+            ERROR_LOG("[Error]: Failed to connect to %s:%d\n", g_args.ip_address, g_args.port);
+            nsh_exit(CODE_BIND_ERROR);
+        }
+
+        g_client_connection->fd_read = sock_fd;
+        g_client_connection->fd_write = sock_fd;
+
+        VERBOSE_LOG("[Connection]: Opened network socket %s:%d\n", g_args.ip_address, g_args.port);
+    }
+    else
+    {
+        ERROR_LOG("[Notice]: You cannot be a client to your own terminal.. how did this even happen?\n");
+        nsh_exit(CODE_WTF);
+    }
+
+    return CODE_OK;
+}
+
+int nsh_evaluate_server()
+{
+    VERBOSE_LOG("[State]: Server mode\n");
+
+    if (g_args.log_file)
+    {
+        FILE* flog = fopen(g_args.log_file, "w+");
+        if (!flog)
+        {
+            fprintf(stderr, "[Error]: Couldn't open file \"%s\" for logging purposes\n", g_args.log_file);
+            nsh_exit(CODE_INVALID_FILE);
+        }
+        fclose(flog);
+        freopen(g_args.log_file, "w+", stderr);
+        VERBOSE_LOG("[State]: Set log file to \"%s\"\n", g_args.log_file);
+    }
+    if (g_args.help) { nsh_internal_help(); nsh_exit(CODE_OK); }
+
+    // Prepare the server
+    if (g_args.domain_sock_path)
+    {
+        nsh_conn_t conn = {.id = g_connections.next_id++};
+        err_code_e err = nsh_internal_init_domain(g_args.domain_sock_path, &conn);
+        if (err != CODE_OK) nsh_exit(err);
+        array_push(&g_connections.array, &conn);
+    }
+    if (g_args.network)
+    {
+        nsh_conn_t conn = {.id = g_connections.next_id++};
+        err_code_e err = nsh_internal_init_network(g_args.ip_address, g_args.port, &conn);
+        if (err != CODE_OK) nsh_exit(err);
+        array_push(&g_connections.array, &conn);
+    }
+    if (g_args.force_terminal || g_connections.array.length == 0)
+    {
+        nsh_conn_t conn = {.id = g_connections.next_id++};
+        nsh_internal_init_console(&conn);
+        VERBOSE_LOG("[Connection]: Using terminal as connection\n");
+        array_push(&g_connections.array, &conn);
+    }
+
+    return CODE_OK;
+}
+
+err_code_e nsh_interpret(nsh_conn_t* connection)
+{
+    VERBOSE_LOG("[Log]: Interpreting commands on connection %d\n", connection->id);
+
     ssize_t readBytes;
     if (connection->type == CONSOLE) readBytes = read(connection->fd_read, BUFFER, BUFFER_SIZE);
     else readBytes = recv(connection->fd_read, BUFFER, BUFFER_SIZE, 0);
 
+    // Reset this connection if the client already closed on us
+    if (readBytes == 0)
+    {
+        VERBOSE_LOG("[Notice]: Client disconnected on %d\n", connection->id);
+        return nsh_internal_abort_connection(connection);
+    }
+
     ssize_t writtenBytes;
     if (connection->type == CONSOLE) writtenBytes = write(connection->fd_write, BUFFER, readBytes);
     else writtenBytes = send(connection->fd_write, BUFFER, readBytes, 0);
-}
-
-void nsh_accept_connection(nsh_conn_t* connection)
-{
-    socklen_t client_length = sizeof(connection->network.remote);
-    int sock_fd = accept(connection->fd_read, (struct sockaddr*)&connection->network.remote, &client_length);
-    if (sock_fd < 0) { ERROR_LOG("[Error]: Failed to accept new connection on ID %d\n", connection->id); return; }
-    connection->state = STATE_ACTIVE;
-    close(connection->fd_read); // fd_write should be the same since we promoted the listening socket to well another listening sockete
-    connection->fd_write = sock_fd;
-    connection->fd_read = sock_fd;
-    VERBOSE_LOG("[Log]: Accepted connection on ID %d\n", connection->id);
+    return CODE_OK;
 }
 
 int nsh_server()
@@ -495,16 +499,16 @@ int nsh_server()
     int valid_args = nsh_evaluate_server();
     if (valid_args != CODE_OK) return valid_args;
     
-    array_t poll_fds; array_create(&poll_fds, g_connections.capacity, sizeof(struct pollfd));
+    array_t poll_fds; array_create(&poll_fds, g_connections.array.capacity, sizeof(struct pollfd));
     while (g_running)
     {
-        nsh_cmd_stat();
+        nsh_command_stat();
 
         array_clear(&poll_fds);
-        if (poll_fds.capacity < g_connections.length) array_resize(&poll_fds, g_connections.capacity);
-        for (size_t i = 0; i < g_connections.length; i++)
+        if (poll_fds.capacity < g_connections.array.length) array_resize(&poll_fds, g_connections.array.capacity);
+        for (size_t i = 0; i < g_connections.array.length; i++)
         {
-            const nsh_conn_t* conn = array_at(&g_connections, i);
+            const nsh_conn_t* conn = array_at(&g_connections.array, i);
             struct pollfd* pfd = array_index(&poll_fds, i);
             pfd->fd = conn->fd_read;
             pfd->events = POLLIN;
@@ -519,9 +523,17 @@ int nsh_server()
             printf("fd %d | events %d | revents %d\n", pfd->fd, pfd->events, pfd->revents); // DEBUG
             if (pfd->revents & POLLIN)
             {
-                nsh_conn_t* conn = array_find_first(&g_connections, (array_find_func)find_connection_by_fd, &pfd->fd);
-                if (conn->state == STATE_ACTIVE) nsh_interpret(conn);
-                else nsh_accept_connection(conn);
+                nsh_conn_t* conn = array_find_first(&g_connections.array, (array_find_func)find_connection_by_fd, &pfd->fd);
+                if (conn->state == STATE_ACTIVE)
+                {
+                    err_code_e err = nsh_interpret(conn);
+                    if (err != CODE_OK) { ERROR_LOG("[Interpret Error]: %d\n", err); continue; }
+                }
+                else
+                {
+                    err_code_e err = nsh_internal_accept(conn);
+                    if (err != CODE_OK) { ERROR_LOG("[Interpret Error]: %d\n", err); continue; }
+                }
                 conn->last_active = time(0);
             }
         }
@@ -553,14 +565,61 @@ int nsh_client()
     return CODE_OK;
 }
 
+/* Essentially main */
+/* Exit functions */
+void nsh_cleanup()
+{
+    static bool cleanup = false;
+    if (cleanup) { ERROR_LOG("[Error]: Called cleanup multiple times!\n"); return; }
+    if (g_args.client)
+    {
+        shutdown(g_client_connection->fd_read, SHUT_RDWR);
+        close(g_client_connection->fd_read);
+        VERBOSE_LOG("[Cleanup]: Client cleanup\n");
+    }
+    else
+    {
+        for (size_t i = 0; i < g_connections.array.length; i++)
+        {
+            nsh_conn_t* conn = array_at(&g_connections.array, i);
+            if (conn->type == CONSOLE) continue;
+            shutdown(conn->fd_read, SHUT_RDWR);
+            close(conn->fd_read);
+            if (conn->fd_read != conn->fd_write) { shutdown(conn->fd_read, SHUT_RDWR); close(conn->fd_write); }
+            if (g_args.server && conn->type == DOMAIN) unlink(conn->domain.path);
+        }
+        free(g_client_connection);
+        VERBOSE_LOG("[Cleanup]: Server cleanup\n");
+    }
+    cleanup = true;
+}
+
+void nsh_exit(int code)
+{
+    nsh_cleanup();
+    exit(code);
+}
+
+int nsh_init(int argc, char** argv)
+{
+    static bool initialized = false;
+    if (initialized) return CODE_OK;
+
+    array_create(&g_connections.array, NSH_INITIAL_MAX_CONNECTIONS, sizeof(nsh_conn_t));
+
+    nsh_parse_args(argc, argv);
+    return CODE_OK;
+}
+
 int nsh(int argc, char** argv)
 {
     int init = nsh_init(argc-1, argv+1);
     if (init != CODE_OK) return init;
 
     int err = CODE_OK;
-    if (main_args.server) err = nsh_server();
+    if (g_args.server) err = nsh_server();
     else err = nsh_client();
 
+    nsh_cleanup();
     return err;
 }

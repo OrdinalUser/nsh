@@ -17,3 +17,12 @@ clean:
 
 run: $(PROJECT_EXE)
 	./$(PROJECT_EXE) $(PROG_FLAGS)
+
+run-server: $(PROJECT_EXE)
+	./$(PROJECT_EXE) -v -s -T -u ~/domain
+
+run-client-domain: $(PROJECT_EXE)
+	./$(PROJECT_EXE) -v -c -u ~/domain
+
+run-client-network: $(PROJECT_EXE)
+	./$(PROJECT_EXE) -v -c
