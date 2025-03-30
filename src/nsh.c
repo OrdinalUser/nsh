@@ -60,12 +60,23 @@ static struct nsh_args
     bool network, force_terminal;
 } g_args = {0};
 
-/* Logging macros */
+/* Logging macros and debug things */
 #define VERBOSE_LOG(format, ...) \
-    do { if(g_args.verbose) {fprintf(stderr, format, ##__VA_ARGS__); fflush(stderr); }} while (0)
+do { if(g_args.verbose) {fprintf(stderr, format, ##__VA_ARGS__); fflush(stderr); }} while (0)
 
+#define DEBUG
+#ifdef DEBUG
+#define DEBUG_BUFF_SIZE 1024
+char DEBUG_BUFF[DEBUG_BUFF_SIZE];
 #define ERROR_LOG(format, ...) \
     do { fprintf(stderr, format, ##__VA_ARGS__); fflush(stderr); } while (0)
+
+#define ERROR_SYS_LOG(format, ...) \
+    do { memset(DEBUG_BUFF, 0, DEBUG_BUFF_SIZE); perror(DEBUG_BUFF); fprintf(stderr, format, ##__VA_ARGS__, DEBUG_BUFF); fflush(stderr); } while (0)
+#else
+#define ERROR_LOG(format, ...)
+#define ERROR_SYS_LOG(format, ...)
+#endif
 
 /* Helper functions for g_connections.array */
 bool find_connection_by_fd(nsh_conn_t* connection, int* fd)
@@ -100,6 +111,7 @@ err_code_e nsh_internal_init_console(nsh_conn_t* conn)
 err_code_e nsh_internal_init_network(char* interface_ip, int port, nsh_conn_t* conn)
 {
     conn->type = NETWORK;
+    conn->state = STATE_INACTIVE;
     memset(&conn->network.remote, 0, sizeof(struct sockaddr_in));
 
     int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -107,8 +119,10 @@ err_code_e nsh_internal_init_network(char* interface_ip, int port, nsh_conn_t* c
     
     conn->network.local.sin_family = AF_INET;
     inet_pton(AF_INET, interface_ip, &conn->network.local.sin_addr);
-
     conn->network.local.sin_port = htons(port);
+
+    int opt = 1;
+    setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     if (bind(sock_fd, (struct sockaddr*)&conn->network.local, sizeof(conn->network.local)) < 0)
     { 
         close(sock_fd);
@@ -133,6 +147,7 @@ err_code_e nsh_internal_init_network(char* interface_ip, int port, nsh_conn_t* c
 err_code_e nsh_internal_init_domain(char* path, nsh_conn_t* conn)
 {
     conn->type = DOMAIN;
+    conn->state = STATE_INACTIVE;
 
     int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock_fd < 0) { ERROR_LOG("[Error]: Failed to create domain socket\n"); return CODE_SOCKET_ERROR; }
@@ -166,8 +181,8 @@ err_code_e nsh_internal_abort_connection(nsh_conn_t* conn)
 {
     if (conn->type == CONSOLE) { VERBOSE_LOG("[Notice]: Trying to abort CONSOLE connection, you can only close it\n"); return CODE_OK; }
     
-    if (shutdown(conn->fd_read, SHUT_RDWR)) { ERROR_LOG("[Error]: Failed to shutdown connection %d\n", conn->id); return CODE_SHUTDOWN; }
-    if (close(conn->fd_read)) { ERROR_LOG("[Error]: Failed to close connection %d\n", conn->id); return CODE_CLOSE; }
+    if (shutdown(conn->fd_read, SHUT_RDWR)) { ERROR_LOG("[Warning]: Failed to shutdown connection %d\n", conn->id); }
+    if (close(conn->fd_read)) { ERROR_LOG("[Warning]: Failed to close connection %d\n", conn->id); }
     VERBOSE_LOG("[Internal]: Aborted connection %d\n", conn->id);
     
     err_code_e err = CODE_OK;
@@ -532,7 +547,7 @@ int nsh_server()
             }
             else if (pfd->revents & POLLNVAL)
             {
-                ERROR_LOG("[Error]: Invalid file descriptor on %d", conn->id);
+                ERROR_LOG("[Error]: Invalid file descriptor on %d\n", conn->id);
                 nsh_internal_abort_connection(conn);
             }
             else if (pfd->revents & POLLERR)
