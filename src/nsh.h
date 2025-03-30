@@ -38,7 +38,6 @@ typedef struct NshConnection
         } network;
         struct {
             struct sockaddr_un addr;
-            char path[PATH_MAX];
         } domain;
     };
     

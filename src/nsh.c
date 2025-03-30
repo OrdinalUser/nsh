@@ -16,6 +16,10 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 
+/* Hard truth constraints */
+// Derived from the fact that
+#define DOMAIN_FILEPATH_MAX_LENGTH ((sizeof((struct sockaddr_un*)0)->sun_path) - 1)
+
 /* Initial config */
 #define NSH_INITIAL_MAX_CONNECTIONS 8
 #define NSH_INITIAL_TIMEOUT 60
@@ -36,6 +40,7 @@ typedef enum ERROR_CODE
     CODE_OK = 0,
     CODE_INVALID_FILE,
     CODE_BIND_ERROR, CODE_LISTEN_ERROR, CODE_SOCKET_ERROR, CODE_SHUTDOWN, CODE_CLOSE, CODE_ACCEPT,
+    CODE_DOMAIN_PATH_LIMIT, CODE_USER_ERROR,
     CODE_WTF
 } err_code_e;
 
@@ -79,9 +84,9 @@ char DEBUG_BUFF[DEBUG_BUFF_SIZE];
 #endif
 
 /* Helper functions for g_connections.array */
-bool find_connection_by_fd(nsh_conn_t* connection, int* fd)
+bool find_connection_by_fd(nsh_conn_t* conn, int* fd)
 {
-    return connection->fd_read == *fd;
+    return conn->fd_read == *fd;
 }
 
 bool find_connection_by_id(nsh_conn_t* conn, int* id)
@@ -146,6 +151,11 @@ err_code_e nsh_internal_init_network(char* interface_ip, int port, nsh_conn_t* c
 
 err_code_e nsh_internal_init_domain(char* path, nsh_conn_t* conn)
 {
+    if (strlen(path) > DOMAIN_FILEPATH_MAX_LENGTH)
+    {
+        ERROR_LOG("[Error]: Filepath \"%s\" exceeds 107 characters limit for domain sockets\n", g_args.domain_sock_path);
+        return CODE_DOMAIN_PATH_LIMIT;
+    }
     conn->type = DOMAIN;
     conn->state = STATE_INACTIVE;
 
@@ -154,7 +164,6 @@ err_code_e nsh_internal_init_domain(char* path, nsh_conn_t* conn)
 
     conn->domain.addr.sun_family = AF_UNIX;
     strcpy(conn->domain.addr.sun_path, g_args.domain_sock_path);
-    strcpy(conn->domain.path, g_args.domain_sock_path);
     unlink(g_args.domain_sock_path);
 
     if (bind(sock_fd, (struct sockaddr*)&conn->domain.addr, sizeof(conn->domain.addr)) == -1)
@@ -195,23 +204,23 @@ err_code_e nsh_internal_abort_connection(nsh_conn_t* conn)
     }
     else if (conn->type == DOMAIN)
     {
-        char path[PATH_MAX]; strcpy(path, conn->domain.path);
+        char path[PATH_MAX]; strcpy(path, conn->domain.addr.sun_path);
         err = nsh_internal_init_domain(path, conn);
     }
 
     return err;
 }
 
-err_code_e nsh_internal_accept(nsh_conn_t* connection)
+err_code_e nsh_internal_accept(nsh_conn_t* conn)
 {
-    socklen_t client_length = sizeof(connection->network.remote);
-    int sock_fd = accept(connection->fd_read, (struct sockaddr*)&connection->network.remote, &client_length);
-    if (sock_fd < 0) { ERROR_LOG("[Error]: Failed to accept new connection at %d\n", connection->id); return CODE_ACCEPT; }
-    if (close(connection->fd_read)) { ERROR_LOG("[Error]: Failed to close socket when promoting connection at %d\n", connection->id); return CODE_CLOSE; } // fd_write should be the same since we promoted the listening socket to well another listening sockete
-    connection->state = STATE_ACTIVE;
-    connection->fd_write = sock_fd;
-    connection->fd_read = sock_fd;
-    VERBOSE_LOG("[Log]: Accepted connection at %d\n", connection->id);
+    socklen_t client_length = sizeof(conn->network.remote);
+    int sock_fd = accept(conn->fd_read, (struct sockaddr*)&conn->network.remote, &client_length);
+    if (sock_fd < 0) { ERROR_LOG("[Error]: Failed to accept new connection at %d\n", conn->id); return CODE_ACCEPT; }
+    if (close(conn->fd_read)) { ERROR_LOG("[Error]: Failed to close socket when promoting connection at %d\n", conn->id); return CODE_CLOSE; } // fd_write should be the same since we promoted the listening socket to well another listening sockete
+    conn->state = STATE_ACTIVE;
+    conn->fd_write = sock_fd;
+    conn->fd_read = sock_fd;
+    VERBOSE_LOG("[Log]: Accepted connection at %d\n", conn->id);
     return CODE_OK;
 }
 
@@ -256,8 +265,8 @@ err_code_e nsh_command_stat()
         }
         else if (conn->type == DOMAIN)
         {
-            fd_read_name = conn->domain.path;
-            fd_write_name = conn->domain.path;
+            fd_read_name = conn->domain.addr.sun_path;
+            fd_write_name = conn->domain.addr.sun_path;
         }
         else
         {
@@ -396,11 +405,17 @@ int nsh_evaluate_client()
 
     if (g_args.domain_sock_path)
     {
+        if (strlen(g_args.domain_sock_path) > DOMAIN_FILEPATH_MAX_LENGTH)
+        {
+            ERROR_LOG("[Error]: Filepath \"%s\" exceeds 107 characters limit for domain sockets\n", g_args.domain_sock_path);
+            return CODE_DOMAIN_PATH_LIMIT;
+        }
+
         g_client_connection->type = DOMAIN;
         int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
         g_client_connection->domain.addr.sun_family = AF_UNIX;
         strcpy(g_client_connection->domain.addr.sun_path, g_args.domain_sock_path);
-        strcpy(g_client_connection->domain.path, g_args.domain_sock_path);
+        //strcpy(g_client_connection->domain.path, g_args.domain_sock_path);
         
         if (connect(sock_fd, (struct sockaddr*)&g_client_connection->domain.addr, sizeof(g_client_connection->domain.addr)) == -1)
         {
@@ -489,25 +504,25 @@ int nsh_evaluate_server()
 }
 
 /* Core of Network SHell */
-err_code_e nsh_interpret(nsh_conn_t* connection)
+err_code_e nsh_interpret(nsh_conn_t* conn)
 {
-    VERBOSE_LOG("[Log]: Interpreting commands on connection %d\n", connection->id);
+    VERBOSE_LOG("[Log]: Interpreting commands on connection %d\n", conn->id);
 
     ssize_t readBytes;
-    if (connection->type == CONSOLE) readBytes = read(connection->fd_read, BUFFER, BUFFER_SIZE);
-    else readBytes = recv(connection->fd_read, BUFFER, BUFFER_SIZE, 0);
+    if (conn->type == CONSOLE) readBytes = read(conn->fd_read, BUFFER, BUFFER_SIZE);
+    else readBytes = recv(conn->fd_read, BUFFER, BUFFER_SIZE, 0);
 
     // Reset this connection if the client already closed on us
     if (readBytes == 0)
     {
-        VERBOSE_LOG("[Notice]: Read 0 bytes from connection %d\n", connection->id);
-        nsh_internal_abort_connection(connection);
+        VERBOSE_LOG("[Notice]: Read 0 bytes from connection %d\n", conn->id);
+        nsh_internal_abort_connection(conn);
         return CODE_OK;
     }
 
     ssize_t writtenBytes;
-    if (connection->type == CONSOLE) writtenBytes = write(connection->fd_write, BUFFER, readBytes);
-    else writtenBytes = send(connection->fd_write, BUFFER, readBytes, 0);
+    if (conn->type == CONSOLE) writtenBytes = write(conn->fd_write, BUFFER, readBytes);
+    else writtenBytes = send(conn->fd_write, BUFFER, readBytes, 0);
     return CODE_OK;
 }
 
@@ -623,7 +638,7 @@ void nsh_cleanup()
             shutdown(conn->fd_read, SHUT_RDWR);
             close(conn->fd_read);
             if (conn->fd_read != conn->fd_write) { shutdown(conn->fd_read, SHUT_RDWR); close(conn->fd_write); }
-            if (g_args.server && conn->type == DOMAIN) unlink(conn->domain.path);
+            if (g_args.server && conn->type == DOMAIN) unlink(conn->domain.addr.sun_path);
         }
         free(g_client_connection);
         VERBOSE_LOG("[Cleanup]: Server cleanup\n");
