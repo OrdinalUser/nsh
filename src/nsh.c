@@ -473,6 +473,7 @@ int nsh_evaluate_server()
     return CODE_OK;
 }
 
+/* Core of Network SHell */
 err_code_e nsh_interpret(nsh_conn_t* connection)
 {
     VERBOSE_LOG("[Log]: Interpreting commands on connection %d\n", connection->id);
@@ -485,6 +486,7 @@ err_code_e nsh_interpret(nsh_conn_t* connection)
     if (readBytes == 0)
     {
         VERBOSE_LOG("[Notice]: Read 0 bytes from connection %d\n", connection->id);
+        nsh_internal_abort_connection(connection);
         return CODE_OK;
     }
 
@@ -523,18 +525,19 @@ int nsh_server()
             nsh_conn_t* conn = array_find_first(&g_connections.array, (array_find_func)find_connection_by_fd, &pfd->fd);
             printf("fd %d | events %d | revents %d\n", pfd->fd, pfd->events, pfd->revents); // DEBUG
             
-            if (pfd->revents & POLLNVAL)
+            if (pfd->revents & POLLHUP)
+            {
+                VERBOSE_LOG("[Notice]: Client disconnected from %d\n", conn->id);
+                nsh_internal_abort_connection(conn);
+            }
+            else if (pfd->revents & POLLNVAL)
             {
                 ERROR_LOG("[Error]: Invalid file descriptor on %d", conn->id);
+                nsh_internal_abort_connection(conn);
             }
             else if (pfd->revents & POLLERR)
             {
                 ERROR_LOG("[Poll]: Straight up POLLERR, what the fuck do I do? - conn %d\n", conn->id);
-                nsh_internal_abort_connection(conn);
-            }
-            else if (pfd->revents & POLLHUP)
-            {
-                VERBOSE_LOG("[Notice]: Client disconnected from %d\n", conn->id);
                 nsh_internal_abort_connection(conn);
             }
             else if (pfd->revents & POLLIN)
@@ -586,7 +589,6 @@ int nsh_client()
 }
 
 /* Essentially main */
-/* Exit functions */
 void nsh_cleanup()
 {
     static bool cleanup = false;
@@ -595,7 +597,7 @@ void nsh_cleanup()
     {
         shutdown(g_client_connection->fd_read, SHUT_RDWR);
         close(g_client_connection->fd_read);
-        VERBOSE_LOG("[Cleanup]: Client cleanup\n");
+        VERBOSE_LOG("[Cleanup]: Closed connection\n");
     }
     else
     {

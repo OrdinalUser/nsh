@@ -26,3 +26,8 @@ run-client-domain: $(PROJECT_EXE)
 
 run-client-network: $(PROJECT_EXE)
 	./$(PROJECT_EXE) -v -c
+
+sync:
+	git fetch
+	git reset --hard HEAD
+	git pull
