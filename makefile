@@ -3,7 +3,7 @@ CFFLAGS = -Wall
 
 PROJECT_NAME=nsh
 SRC=src
-SRCS=$(SRC)/main.c $(SRC)/nsh.c $(SRC)/array.c
+SRCS=$(SRC)/main.c $(SRC)/nsh.c $(SRC)/array.c $(SRC)/interpreter.c
 BIN_FOLDER=bin
 PROJECT_EXE=$(BIN_FOLDER)/$(PROJECT_NAME)
 
