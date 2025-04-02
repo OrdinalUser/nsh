@@ -19,7 +19,7 @@ run: $(PROJECT_EXE)
 	./$(PROJECT_EXE) $(PROG_FLAGS)
 
 run-server: $(PROJECT_EXE)
-	./$(PROJECT_EXE) -v -s -T -u ~/domain
+	./$(PROJECT_EXE) -v -u ~/domain -l log.txt
 
 run-client-domain: $(PROJECT_EXE)
 	./$(PROJECT_EXE) -v -c -u ~/domain

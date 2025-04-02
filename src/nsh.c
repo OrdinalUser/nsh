@@ -1,4 +1,5 @@
 #include "nsh.h"
+#include "interpreter.h"
 
 /* libc includes */
 #include <stddef.h>
@@ -63,6 +64,7 @@ struct nsh_shared_connections
 struct nsh_instance_state
 {
     nsh_conn_t connection;
+    int sock_fd;
 };
 
 /* Lookups */
@@ -72,7 +74,7 @@ const char* NSH_CONNECTION_TYPE_STR[] = {
 
 /* Globals */
 struct nsh_args g_args = {0};
-struct nsh_client_state client = {0};
+struct nsh_client_state client = {.running = true };
 struct nsh_instance_state instance = {0}; // Contains the original connection entry for each instance
 struct nsh_shared_connections* shared_mem;
 
@@ -96,6 +98,33 @@ char DEBUG_BUFF[DEBUG_BUFF_SIZE];
 
 #define ZERO_MEMORY(var) do { memset(&var, 0, sizeof(var)); } while (0)
 
+/* Various helpers */
+// Needs to be mutex locked!
+nsh_conn_t* shared_mem_get_this_instance_entry()
+{
+    pid_t pid = getpid();
+    assert(instance.connection.pid == pid);
+    for (int i = 0; i < shared_mem->count; i++)
+    {
+        if (shared_mem->connections[i].pid == pid)
+        {
+            pthread_mutex_unlock(&shared_mem->lock);
+            return &shared_mem->connections[i];
+        }
+    }
+    // THIS SHOULD NEVER HAPPEN
+    assert(0);
+    return NULL;
+}
+
+void shared_mem_update_instance()
+{
+    pthread_mutex_lock(&shared_mem->lock);
+    nsh_conn_t* conn = shared_mem_get_this_instance_entry();
+    memcpy(conn, &instance.connection, sizeof(nsh_conn_t));
+    pthread_mutex_unlock(&shared_mem->lock);
+}
+
 /* Internal functions of NSHell */
 void nsh_internal_help()
 {
@@ -112,8 +141,8 @@ pid_t nsh_internal_start_instance(nsh_conn_t conn)
         ERROR_SYS_LOG("[Error]: nsh_internal_start_instance::fork() ");
         return -1;
     case 0:
-        fclose(stdin);
-        fclose(stdout);
+        close(STDIN_FILENO);
+        close(STDOUT_FILENO);
         instance.connection = conn;
         instance.connection.pid = getpid();
         return 0;
@@ -124,18 +153,77 @@ pid_t nsh_internal_start_instance(nsh_conn_t conn)
 
 nsh_err_e nsh_register_instance()
 {
-    if (instance.connection.type == CONSOLE) return CODE_OK;
-    pthread_mutex_lock(&shared_mem->lock);
+    if (instance.connection.type == CONSOLE)
+    {
+        instance.connection.id = -1;
+        return CODE_OK;
+    }
 
-    if (shared_mem->count >= shared_mem->capacity) return CODE_CONNECTION_LIMIT;
+    pthread_mutex_lock(&shared_mem->lock);
+    if (shared_mem->count >= shared_mem->capacity)
+    {
+        pthread_mutex_unlock(&shared_mem->lock);
+        return CODE_CONNECTION_LIMIT;
+    }
     
     instance.connection.id = shared_mem->next_id++;
-    memcpy(shared_mem->connections + shared_mem->count, &instance.connection, sizeof(nsh_conn_t));
-    shared_mem->count++;
+    memcpy(&shared_mem->connections[shared_mem->count++], &instance.connection, sizeof(nsh_conn_t));
 
     pthread_mutex_unlock(&shared_mem->lock);
     VERBOSE_LOG("[Internal]: Registered new connection into shared memory\n");
     return CODE_OK;
+}
+
+nsh_err_e nsh_internal_reset_connection()
+{
+    struct sockaddr_un addr_un;
+    struct sockaddr_in addr_in;
+    int sock_fd = 0;
+    
+    switch (instance.connection.type)
+    {
+    case CONSOLE:
+        instance.connection.state = STATE_ACTIVE;
+        return CODE_OK;
+    case DOMAIN:
+        if (instance.connection.state == STATE_ACTIVE)
+        {
+            if (shutdown(instance.sock_fd, SHUT_RDWR)) ERROR_SYS_LOG("[Warning]: Failed to shutdown connection %d\n", instance.connection.id);
+            if (close(instance.sock_fd)) { ERROR_SYS_LOG("[Warning]: Failed to close connection %d\n", instance.connection.id); }
+            pthread_mutex_lock(&shared_mem->lock);
+            nsh_conn_t* shared_instance = shared_mem_get_this_instance_entry();
+            shared_instance->state = STATE_INACTIVE;
+            pthread_mutex_unlock(&shared_mem->lock);
+            instance.connection.state = STATE_INACTIVE;
+        }
+        unlink(instance.connection.domain.path);
+        addr_un.sun_family = AF_UNIX;
+        strcpy(addr_un.sun_path, instance.connection.domain.path);
+
+        instance.sock_fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+        if (sock_fd < 0) { ERROR_LOG("[Error]: Failed to create domain socket\n"); return CODE_SOCKET; }
+        if (bind(instance.sock_fd, (struct sockaddr*)&addr_un, sizeof(addr_un)) == -1)
+        {
+            close(instance.sock_fd);
+            ERROR_SYS_LOG("[Error]: Failed to bind domain socket \"%s\" at connection %d\n", g_args.domain_sock_path, instance.connection.id);
+            return CODE_BIND;
+        }
+        if (listen(instance.sock_fd, 1) == -1)
+        {
+            close(instance.sock_fd);
+            ERROR_SYS_LOG("[Error]: Failed to listen on domain socket \"%s\" at connection %d\n", g_args.domain_sock_path, instance.connection.id);
+            return CODE_LISTEN;
+        }
+
+        VERBOSE_LOG("[Log]: Opened domain connection \"%s\" at id %d\n", instance.connection.domain.path, instance.connection.id);
+        return CODE_OK;
+    case NETWORK:
+        return CODE_OK;
+    default:
+        ERROR_LOG("[Error]: Instance has invalid connection type %d ... this is a nightmare.\n", instance.connection.type);
+        assert(0);
+        return CODE_OK;
+    }
 }
 
 /* Argument parsing */
@@ -144,6 +232,7 @@ void nsh_args_parse(int argc, char** argv)
     g_args.timeout = NSH_INITIAL_TIMEOUT;
     g_args.port = NSH_INITIAL_PORT;
     g_args.ip_address = NSH_INITIAL_IP_INTERFACE;
+    memset(g_args.script_file, 0, PATH_MAX);
 
     int unnamed_arg = 0;
     char* arg_value = 0;
@@ -152,7 +241,6 @@ void nsh_args_parse(int argc, char** argv)
 
     int ip4;
     FILE* temp_fd;
-
     for (int argi = 0; argi < argc; argi++)
     {
         char* arg = argv[argi];
@@ -243,6 +331,10 @@ void nsh_args_parse(int argc, char** argv)
             else fprintf(stderr, "Encountered unknown arg: '%s', use - to prefix flags\n", arg);
         }
     }
+    if (argc == 0 || (argc == 1 && g_args.script_file[0]))
+    {
+        g_args.client = true;
+    }
 }
 
 /* Core of NSHell */
@@ -276,7 +368,7 @@ nsh_err_e nsh_client_init()
             return CODE_DOMAIN_PATH_LIMIT;
         }
 
-        sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        sock_fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
         if (sock_fd == 1)
         {
             ERROR_SYS_LOG("[Error]: Failed to create a socket ");
@@ -305,7 +397,7 @@ nsh_err_e nsh_client_init()
     }
     else
     {
-        sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        sock_fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
         if (sock_fd == 1)
         {
             ERROR_SYS_LOG("[Error]: Failed to create a socket ");
@@ -351,22 +443,35 @@ nsh_err_e nsh_client_init()
 // and sending back and forth data between target and local console
 nsh_err_e nsh_client()
 {
-    VERBOSE_LOG("[State]: Client mode\n");
+    if (!g_args.domain_sock_path && !g_args.network)
+    {
+        return nsh_interpreter();
+    }
+
+    VERBOSE_LOG("[State]: Remote client mode\n");
     nsh_err_e err = nsh_client_init();
     if (err != CODE_OK) return err;
 
     while (client.running)
     {
-        printf("-- [ Frame ] ---------------------\n");
+        //printf("-- [ Frame ] ------------\n");
+        memset(client.buffer, 0, NSH_CLIENT_BUFFER_SIZE);
+        recv(client.fd, client.buffer, NSH_CLIENT_BUFFER_SIZE, 0);
+        printf("%s", client.buffer);
+        fflush(stdout);
+
         fgets(client.buffer, NSH_CLIENT_BUFFER_SIZE, stdin);
         size_t payloadLen = strlen(client.buffer);
+        fflush(stdin);
 
         int sent = send(client.fd, client.buffer, payloadLen, 0);
         if (sent == -1) { ERROR_SYS_LOG("[Error]: nsh_client::send() produced "); continue; }
 
-        printf("-- [ Shell Response ] ------------\n");
+        //printf("-- [ Shell Response ] ------------\n");
         ssize_t readBytes = recv(client.fd, client.buffer, NSH_CLIENT_BUFFER_SIZE, 0);
+        client.connection.last_active = time(0);
         
+        if (readBytes == 1 && client.buffer[0] == '\n') continue;
         if (readBytes == -1)
         {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -375,11 +480,10 @@ nsh_err_e nsh_client()
                 printf(">> Connection timed out <<\n");
             break;
         }
-        
         if (readBytes == 0)
             { printf(">> Connection terminated <<\n"); break; }
-        client.connection.last_active = time(0);
-        write(fileno(stdout), client.buffer, readBytes);
+        printf("%s", client.buffer);
+        fflush(stdout);
     }
 
     return CODE_OK;
@@ -402,7 +506,7 @@ nsh_err_e nsh_instance_shm_init()
         }
         // Get access to shared mem
         shared_mem = mmap(NULL, NSH_SHARED_MEM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-        VERBOSE_LOG("[Shared]: Succefully mapped existing shared memory object\n");
+        VERBOSE_LOG("[Shared]: Successfully mapped existing shared memory object\n");
     }
     else
     {
@@ -478,12 +582,69 @@ nsh_err_e nsh_instance_init()
     instance.connection = instances[0];
     instance.connection.pid = getpid();
 
-    if (instCnt >= 2)
-    {
-        pid_t pid = nsh_internal_start_instance(instances[1]);
-    }
+    if (instCnt == 2) nsh_internal_start_instance(instances[1]);
     
-    return nsh_register_instance();
+    err = nsh_register_instance();
+    if (err != CODE_OK) return err;
+
+    err = nsh_internal_reset_connection();
+    return err;
+}
+
+// Deals with accepting our connectee and demolishing the listening socket
+nsh_err_e nsh_instance_accept()
+{
+    struct sockaddr_un addr_un;
+    struct sockaddr_in addr_in;
+
+    int sock_fd;
+    socklen_t clientLen;
+    switch (instance.connection.type)
+    {
+    case CONSOLE:
+        return CODE_OK;
+    case DOMAIN:
+        clientLen = sizeof(addr_un);
+        sock_fd = accept(instance.sock_fd, (struct sockaddr*)&addr_un, &clientLen);
+        if (sock_fd < 0) { ERROR_SYS_LOG("[Error]: Failed to accept new connection at %d ", instance.connection.id); return CODE_ACCEPT; }
+        if (close(instance.sock_fd)) { ERROR_SYS_LOG("[Error]: Failed to close listen socket when promoting connection at %d ", instance.connection.id); return CODE_CLOSE; } // fd_write should be the same since we promoted the listening socket to well another listening socket
+        
+        instance.sock_fd = sock_fd;
+        instance.connection.state = STATE_ACTIVE;
+        dup2(instance.sock_fd, STDIN_FILENO);
+        dup2(instance.sock_fd, STDOUT_FILENO);
+
+        shared_mem_update_instance();
+        VERBOSE_LOG("[Log]: Accepted connection at %d\n", instance.connection.id);
+        break;
+    case NETWORK:
+        return CODE_WTF;
+    default:
+        assert(0);
+        return CODE_WTF;
+    }
+
+    // Init stdin & stdout for the interpreter to be pretty
+    fflush(stdin);
+    fflush(stdout);
+    setbuf(stdin, NULL);
+    setbuf(stdout, NULL);
+    fdopen(STDIN_FILENO, "r");
+    fdopen(STDOUT_FILENO, "w");
+
+    return CODE_OK;
+}
+
+// Closes our connection, we don't care for errors as we're done
+nsh_err_e nsh_instance_close()
+{
+    if (instance.connection.type == CONSOLE) return CODE_OK;
+    shutdown(instance.sock_fd, SHUT_RDWR);
+    close(instance.sock_fd);
+    if (instance.connection.type == DOMAIN) unlink(instance.connection.domain.path);
+
+    VERBOSE_LOG("[Log]: Closed instance connection at %d\n", instance.connection.id);
+    return CODE_OK;
 }
 
 nsh_err_e nsh_instance()
@@ -491,9 +652,12 @@ nsh_err_e nsh_instance()
     nsh_err_e err = nsh_instance_init();
     if (err != CODE_OK) return err;
 
-    sleep(2);
+    err = nsh_instance_accept();
+    if (err != CODE_OK) return err;
 
-    return CODE_OK;
+    err = nsh_interpreter();
+
+    return err;
 }
 
 /* Flow functions */
@@ -502,44 +666,55 @@ void nsh_cleanup()
     if (g_args.client)
     {
         // Cleanup client resources
+        close(client.fd);
         free(client.buffer);
         VERBOSE_LOG("[Cleanup]: Client cleanup\n");
     }
     else
     {
-        pthread_mutex_lock(&shared_mem->lock);
-        // Unregister our instance from shared mem if we're present
+        // Close our instance connection
+        nsh_instance_close();
+
+        assert(instance.connection.type != CONSOLE);
+        //if (instance.connection.type == CONSOLE) return;
+        
         pid_t us = getpid();
-        for (size_t i = 0; i < shared_mem->count; i++)
-        {
-            nsh_conn_t* conn = shared_mem->connections + i;
-            if (conn->pid == us)
-            {
-                nsh_conn_t* last = shared_mem->connections + (shared_mem->count-1);
-                if (conn == last)
-                {
-                    // Zero out our entry if we're the last entry
-                    printf("deleting record id %d pid %d\n", conn->id, conn->pid);
-                    memset(conn, 0, sizeof(nsh_conn_t));
-                    shared_mem->count--;
-                    break;
-                }
-                else
-                {
-                    // Found our entry, move last entry into our position
-                    // effectively deleting ours and keeping the array dense
-                    printf("deleting record id %d pid %d\n", conn->id, conn->pid);
-                    memcpy(conn, last, sizeof(nsh_conn_t));
-                    shared_mem->count--;
-                    break;
-                }
-            }
-        }
-        if (shared_mem->count == 0)
+        pthread_mutex_lock(&shared_mem->lock);
+        if (shared_mem->count <= 1)
         {
             // We were the last active instance, cleanup shared resource
             shm_unlink(NSH_SHARED_MEM_NAME);
-            VERBOSE_LOG("[Shared]: Shared memory cleanup by last exiting instance\n");    
+            VERBOSE_LOG("[Shared]: Shared memory cleanup by last exiting instance\n");   
+        }
+        else
+        {
+            // Unregister our instance from shared mem WHERE we're present
+            for (size_t i = 0; i < shared_mem->count; i++)
+            {
+                nsh_conn_t* conn = shared_mem->connections + i;
+                if (conn->pid == us)
+                {
+                    nsh_conn_t* last = shared_mem->connections + shared_mem->count - 1;
+                    if (conn == last)
+                    {
+                        // Zero out our entry if we're the last entry
+                        //printf("deleting record id %d pid %d\n", conn->id, conn->pid);
+                        memset(conn, 0, sizeof(nsh_conn_t));
+                        VERBOSE_LOG("[Log]: Deleting shared record for %d owned by %d\n", conn->id, conn->pid);
+                        shared_mem->count--;
+                        break;
+                    }
+                    else
+                    {
+                        // Found our entry, move last entry into our position
+                        // effectively deleting ours and keeping the array dense
+                        VERBOSE_LOG("[Log]: Deleting shared record for %d owned by %d\n", conn->id, conn->pid);
+                        memcpy(conn, last, sizeof(nsh_conn_t));
+                        shared_mem->count--;
+                        break;
+                    }
+                }
+            }
         }
         pthread_mutex_unlock(&shared_mem->lock);
 
@@ -570,26 +745,6 @@ int nsh(int argc, char** argv)
 }
 
 /* Deal with later */
-// err_code_e nsh_internal_init_console(nsh_conn_t* conn)
-// {
-//     pthread_mutex_lock(&g_connections->lock);
-//     if (g_connections->count >= g_connections->capacity)
-//     {
-//         return CODE_CONNECTION_LIMIT;
-//     }
-
-//     conn->type = CONSOLE;
-//     conn->state = STATE_ACTIVE;
-//     conn->fd_read = fileno(stdin);
-//     conn->fd_write = fileno(stdout);
-    
-//     memcpy(g_connections->connections + g_connections->count, conn, sizeof(nsh_conn_t));
-//     g_connections->count++;
-//     pthread_mutex_unlock(&g_connections->lock);
-
-//     VERBOSE_LOG("[Internal]: Initialized terminal as a connection\n");
-//     return CODE_OK;    
-// }
 
 // err_code_e nsh_internal_init_network(char* interface_ip, int port, nsh_conn_t* conn)
 // {
