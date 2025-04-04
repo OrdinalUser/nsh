@@ -15,16 +15,18 @@
 #include <errno.h>
 
 /* linux includes*/
+#include <poll.h>
 #include <sys/stat.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <pthread.h>
+#include <termios.h>
 
 /* Default config */
 #define NSH_INITIAL_PORT 8888
-#define NSH_INITIAL_IP_INTERFACE "255.255.255.255"
+#define NSH_INITIAL_IP_INTERFACE "0.0.0.0"
 #define NSH_INITIAL_TIMEOUT 60
 
 #define NSH_MAX_CONNECTIONS_COUNT 64
@@ -176,8 +178,8 @@ nsh_err_e nsh_register_instance()
 
 nsh_err_e nsh_internal_reset_connection()
 {
-    struct sockaddr_un addr_un;
-    struct sockaddr_in addr_in;
+    struct sockaddr_un addr_un = {0};
+    struct sockaddr_in addr_in = {0};
     int sock_fd = 0;
     
     switch (instance.connection.type)
@@ -200,24 +202,61 @@ nsh_err_e nsh_internal_reset_connection()
         addr_un.sun_family = AF_UNIX;
         strcpy(addr_un.sun_path, instance.connection.domain.path);
 
-        instance.sock_fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+        instance.sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
         if (sock_fd < 0) { ERROR_LOG("[Error]: Failed to create domain socket\n"); return CODE_SOCKET; }
         if (bind(instance.sock_fd, (struct sockaddr*)&addr_un, sizeof(addr_un)) == -1)
         {
             close(instance.sock_fd);
-            ERROR_SYS_LOG("[Error]: Failed to bind domain socket \"%s\" at connection %d\n", g_args.domain_sock_path, instance.connection.id);
+            ERROR_SYS_LOG("[Error]: Failed to bind domain socket \"%s\" at connection %d\n", instance.connection.domain.path, instance.connection.id);
             return CODE_BIND;
         }
         if (listen(instance.sock_fd, 1) == -1)
         {
             close(instance.sock_fd);
-            ERROR_SYS_LOG("[Error]: Failed to listen on domain socket \"%s\" at connection %d\n", g_args.domain_sock_path, instance.connection.id);
+            ERROR_SYS_LOG("[Error]: Failed to listen on domain socket \"%s\" at connection %d\n", instance.connection.domain.path, instance.connection.id);
             return CODE_LISTEN;
         }
 
         VERBOSE_LOG("[Log]: Opened domain connection \"%s\" at id %d\n", instance.connection.domain.path, instance.connection.id);
         return CODE_OK;
     case NETWORK:
+        if (instance.connection.state == STATE_ACTIVE)
+        {
+            if (shutdown(instance.sock_fd, SHUT_RDWR)) ERROR_SYS_LOG("[Warning]: Failed to shutdown connection %d\n", instance.connection.id);
+            if (close(instance.sock_fd)) { ERROR_SYS_LOG("[Warning]: Failed to close connection %d\n", instance.connection.id); }
+            pthread_mutex_lock(&shared_mem->lock);
+            nsh_conn_t* shared_instance = shared_mem_get_this_instance_entry();
+            shared_instance->state = STATE_INACTIVE;
+            pthread_mutex_unlock(&shared_mem->lock);
+            instance.connection.state = STATE_INACTIVE;
+        }
+
+        addr_in.sin_family = AF_INET;
+        if (strcmp(instance.connection.network.ip_to, NSH_INITIAL_IP_INTERFACE) == 0)
+            addr_in.sin_addr.s_addr = htonl(INADDR_ANY);
+        else
+            inet_pton(AF_INET, instance.connection.network.ip_to, &addr_in.sin_addr);
+        addr_in.sin_port = htons(instance.connection.network.port_to);
+
+        instance.sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock_fd < 0) { ERROR_LOG("[Error]: Failed to create network socket\n"); return CODE_SOCKET; }
+        int opt = 1;
+        setsockopt(instance.sock_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        if (bind(instance.sock_fd, (struct sockaddr*)&addr_in, sizeof(addr_in)) == -1)
+        {
+            close(instance.sock_fd);
+            ERROR_SYS_LOG("[Error]: Failed to bind network socket %s:%d at connection %d\n", instance.connection.network.ip_to, instance.connection.network.port_to, instance.connection.id);
+            return CODE_BIND;
+        }
+        if (listen(instance.sock_fd, 1) == -1)
+        {
+            close(instance.sock_fd);
+            ERROR_SYS_LOG("[Error]: Failed to listen on network socket %s:%d at connection %d\n", instance.connection.network.ip_to, instance.connection.network.port_to, instance.connection.id);
+            return CODE_LISTEN;
+        }
+        
+        VERBOSE_LOG("[Log]: Waiting for network connection %s:%d at id %d\n", instance.connection.network.ip_to, instance.connection.network.port_to, instance.connection.id);
         return CODE_OK;
     default:
         ERROR_LOG("[Error]: Instance has invalid connection type %d ... this is a nightmare.\n", instance.connection.type);
@@ -331,7 +370,7 @@ void nsh_args_parse(int argc, char** argv)
             else fprintf(stderr, "Encountered unknown arg: '%s', use - to prefix flags\n", arg);
         }
     }
-    if (argc == 0 || (argc == 1 && g_args.script_file[0]))
+    if (g_args.script_file[0] != '\0' && !g_args.domain_sock_path && !g_args.network)
     {
         g_args.client = true;
     }
@@ -368,7 +407,7 @@ nsh_err_e nsh_client_init()
             return CODE_DOMAIN_PATH_LIMIT;
         }
 
-        sock_fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+        sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
         if (sock_fd == 1)
         {
             ERROR_SYS_LOG("[Error]: Failed to create a socket ");
@@ -397,8 +436,8 @@ nsh_err_e nsh_client_init()
     }
     else
     {
-        sock_fd = socket(AF_UNIX, SOCK_SEQPACKET, 0);
-        if (sock_fd == 1)
+        sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock_fd == -1)
         {
             ERROR_SYS_LOG("[Error]: Failed to create a socket ");
             return CODE_SOCKET;
@@ -439,52 +478,83 @@ nsh_err_e nsh_client_init()
     return CODE_OK;
 }
 
+static struct termios termios_original;
+static bool termios_rewritten = false;
+void nsh_set_terminal_raw()
+{
+    tcgetattr(fileno(stdin), &termios_original);
+    
+    struct termios raw = termios_original;
+    raw.c_lflag &= ~(ICANON | ECHO);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    
+    tcsetattr(fileno(stdin), TCSANOW, &raw);
+    termios_rewritten = true;
+}
+
+void nsh_terminal_restore()
+{
+    if (termios_rewritten)
+        tcsetattr(fileno(stdin), TCSANOW, &termios_original);
+}
+
 // Takes care of connecting to target specified by args
 // and sending back and forth data between target and local console
 nsh_err_e nsh_client()
 {
-    if (!g_args.domain_sock_path && !g_args.network)
-    {
-        return nsh_interpreter();
-    }
-
     VERBOSE_LOG("[State]: Remote client mode\n");
     nsh_err_e err = nsh_client_init();
     if (err != CODE_OK) return err;
+    
+    nsh_set_terminal_raw();
+    fflush(stdin);
+    fflush(stdout);
+    setbuf(stdin, NULL);
+    send(client.fd, "\n", 1, 0); // So we get a prompt at the start
 
+    client.running = true;
     while (client.running)
     {
-        //printf("-- [ Frame ] ------------\n");
+        struct pollfd fds[2] = {{fileno(stdin), POLLIN, 0}, {client.fd, POLLIN, 0}};
         memset(client.buffer, 0, NSH_CLIENT_BUFFER_SIZE);
-        recv(client.fd, client.buffer, NSH_CLIENT_BUFFER_SIZE, 0);
-        printf("%s", client.buffer);
-        fflush(stdout);
 
-        fgets(client.buffer, NSH_CLIENT_BUFFER_SIZE, stdin);
-        size_t payloadLen = strlen(client.buffer);
-        fflush(stdin);
-
-        int sent = send(client.fd, client.buffer, payloadLen, 0);
-        if (sent == -1) { ERROR_SYS_LOG("[Error]: nsh_client::send() produced "); continue; }
-
-        //printf("-- [ Shell Response ] ------------\n");
-        ssize_t readBytes = recv(client.fd, client.buffer, NSH_CLIENT_BUFFER_SIZE, 0);
-        client.connection.last_active = time(0);
-        
-        if (readBytes == 1 && client.buffer[0] == '\n') continue;
-        if (readBytes == -1)
+        int errpoll = poll(fds, 2, g_args.timeout);
+        if (fds[0].revents & POLLIN)
         {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                ERROR_SYS_LOG("[Error]: recv() error ");
-            else
-                printf(">> Connection timed out <<\n");
-            break;
+            // Send over client data from stdin
+            ssize_t readBytes = read(fileno(stdin), client.buffer, NSH_CLIENT_BUFFER_SIZE);
+            send(client.fd, client.buffer, readBytes, 0);
         }
-        if (readBytes == 0)
+        if (fds[1].revents & POLLIN)
+        {
+            ssize_t readBytes = recv(client.fd, client.buffer, NSH_CLIENT_BUFFER_SIZE-1, 0);
+            client.buffer[readBytes] = 0;
+            client.connection.last_active = time(0);
+
+            if (readBytes == -1)
+            {
+                if (errno == EAGAIN || errno == EWOULDBLOCK)
+                {
+                    ERROR_SYS_LOG("[Error]: recv() error ");
+                    continue;
+                }
+                else
+                {
+                    printf(">> Connection timed out <<\n");
+                    break;
+                }
+            }
+            else if (readBytes == 0)
             { printf(">> Connection terminated <<\n"); break; }
-        printf("%s", client.buffer);
-        fflush(stdout);
+            
+            // Display data from remote connection
+            write(fileno(stdout), client.buffer, readBytes);
+            fflush(stdout);
+        }
     }
+    //printf("-- [ Shell Response ] ------------\n");
+    nsh_terminal_restore();
 
     return CODE_OK;
 }
@@ -607,6 +677,7 @@ nsh_err_e nsh_instance_accept()
         clientLen = sizeof(addr_un);
         sock_fd = accept(instance.sock_fd, (struct sockaddr*)&addr_un, &clientLen);
         if (sock_fd < 0) { ERROR_SYS_LOG("[Error]: Failed to accept new connection at %d ", instance.connection.id); return CODE_ACCEPT; }
+        if (shutdown(instance.sock_fd, SHUT_RDWR)) { ERROR_SYS_LOG("[Error]: Failed to shutdown socket at %d ", instance.connection.id); return CODE_SHUTDOWN; }
         if (close(instance.sock_fd)) { ERROR_SYS_LOG("[Error]: Failed to close listen socket when promoting connection at %d ", instance.connection.id); return CODE_CLOSE; } // fd_write should be the same since we promoted the listening socket to well another listening socket
         
         instance.sock_fd = sock_fd;
@@ -615,10 +686,23 @@ nsh_err_e nsh_instance_accept()
         dup2(instance.sock_fd, STDOUT_FILENO);
 
         shared_mem_update_instance();
-        VERBOSE_LOG("[Log]: Accepted connection at %d\n", instance.connection.id);
+        VERBOSE_LOG("[Log]: Accepted domain connection at %d\n", instance.connection.id);
         break;
     case NETWORK:
-        return CODE_WTF;
+        clientLen = sizeof(addr_in);
+        sock_fd = accept(instance.sock_fd, (struct sockaddr*)&addr_in, &clientLen);
+        if (sock_fd < 0) { ERROR_SYS_LOG("[Error]: Failed to accept new connection at %d ", instance.connection.id); return CODE_ACCEPT; }
+        if (shutdown(instance.sock_fd, SHUT_RDWR)) { ERROR_SYS_LOG("[Error]: Failed to shutdown socket at %d ", instance.connection.id); return CODE_SHUTDOWN; }
+        if (close(instance.sock_fd)) { ERROR_SYS_LOG("[Error]: Failed to close listen socket when promoting connection at %d ", instance.connection.id); return CODE_CLOSE; } // fd_write should be the same since we promoted the listening socket to well another listening socket
+        
+        instance.sock_fd = sock_fd;
+        instance.connection.state = STATE_ACTIVE;
+        dup2(instance.sock_fd, STDIN_FILENO);
+        dup2(instance.sock_fd, STDOUT_FILENO);
+
+        shared_mem_update_instance();
+        VERBOSE_LOG("[Log]: Accepted network connection at %d\n", instance.connection.id);
+        break;
     default:
         assert(0);
         return CODE_WTF;
@@ -655,7 +739,22 @@ nsh_err_e nsh_instance()
     err = nsh_instance_accept();
     if (err != CODE_OK) return err;
 
-    err = nsh_interpreter();
+    if (instance.connection.type == CONSOLE) nsh_set_terminal_raw();
+    do
+    {
+        fflush(stdin);
+        fflush(stdout);
+        err = nsh_interpreter();
+        if (err == SHELL_RESET)
+        {
+            VERBOSE_LOG("[Instance]: Client disconnected from connection %d\n", instance.connection.id);
+            err = nsh_internal_reset_connection();
+            if (err != CODE_OK) return err;
+            err = nsh_instance_accept();
+            if (err != CODE_OK) return err;
+        }
+        else if (err == SHELL_EXIT) break;
+    } while (true);
 
     return err;
 }
@@ -663,6 +762,7 @@ nsh_err_e nsh_instance()
 /* Flow functions */
 void nsh_cleanup()
 {
+    nsh_terminal_restore();
     if (g_args.client)
     {
         // Cleanup client resources
@@ -675,7 +775,7 @@ void nsh_cleanup()
         // Close our instance connection
         nsh_instance_close();
 
-        assert(instance.connection.type != CONSOLE);
+        //assert(instance.connection.type != CONSOLE);
         //if (instance.connection.type == CONSOLE) return;
         
         pid_t us = getpid();
@@ -686,7 +786,7 @@ void nsh_cleanup()
             shm_unlink(NSH_SHARED_MEM_NAME);
             VERBOSE_LOG("[Shared]: Shared memory cleanup by last exiting instance\n");   
         }
-        else
+        else if (instance.connection.type != CONSOLE)
         {
             // Unregister our instance from shared mem WHERE we're present
             for (size_t i = 0; i < shared_mem->count; i++)
@@ -745,136 +845,6 @@ int nsh(int argc, char** argv)
 }
 
 /* Deal with later */
-
-// err_code_e nsh_internal_init_network(char* interface_ip, int port, nsh_conn_t* conn)
-// {
-//     conn->type = NETWORK;
-//     conn->state = STATE_INACTIVE;
-//     memset(&conn->network.remote, 0, sizeof(struct sockaddr_in));
-
-//     int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-//     if (sock_fd < 0) { ERROR_LOG("[Error]: Failed to create internet socket\n"); return CODE_SOCKET_ERROR; }
-    
-//     conn->network.local.sin_family = AF_INET;
-//     inet_pton(AF_INET, interface_ip, &conn->network.local.sin_addr);
-//     conn->network.local.sin_port = htons(port);
-
-//     int opt = 1;
-//     setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-//     if (bind(sock_fd, (struct sockaddr*)&conn->network.local, sizeof(conn->network.local)) < 0)
-//     { 
-//         close(sock_fd);
-//         ERROR_LOG("[Error]: Failed to bind internet socket to %s:%d\n", interface_ip, port);
-//         return CODE_BIND_ERROR;
-//     }
-
-//     if (listen(sock_fd, 1) < 0)
-//     {
-//         close(sock_fd);
-//         ERROR_LOG("[Error]: Failed to listen at bound socket %s:%d\n", interface_ip, port);
-//         return CODE_LISTEN_ERROR;
-//     }
-
-//     conn->fd_read = sock_fd;
-//     conn->fd_write = sock_fd;
-
-//     VERBOSE_LOG("[Internal]: Initialized network socket %s:%d\n", interface_ip, port);
-//     return CODE_OK;
-// }
-
-// err_code_e nsh_internal_init_domain(char* path, nsh_conn_t* conn)
-// {
-//     pthread_mutex_lock(&g_connections->lock);
-//     if (g_connections->count >= g_connections->capacity)
-//     {
-//         return CODE_CONNECTION_LIMIT;
-//     }
-//     conn->id = g_connections->next_id++;
-//     if (strlen(path) > DOMAIN_FILEPATH_MAX_LENGTH)
-//     {
-//         ERROR_LOG("[Error]: Filepath \"%s\" exceeds 107 characters limit for domain sockets\n", g_args.domain_sock_path);
-//         return CODE_DOMAIN_PATH_LIMIT;
-//     }
-//     conn->type = DOMAIN;
-//     conn->state = STATE_INACTIVE;
-
-//     int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-//     if (sock_fd < 0) { ERROR_LOG("[Error]: Failed to create domain socket\n"); return CODE_SOCKET_ERROR; }
-
-//     conn->domain.addr.sun_family = AF_UNIX;
-//     strcpy(conn->domain.addr.sun_path, g_args.domain_sock_path);
-//     unlink(g_args.domain_sock_path);
-
-//     if (bind(sock_fd, (struct sockaddr*)&conn->domain.addr, sizeof(conn->domain.addr)) == -1)
-//     {
-//         close(sock_fd);
-//         ERROR_LOG("[Error]: Failed to bind domain socket \"%s\"\n", g_args.domain_sock_path);
-//         return CODE_BIND_ERROR;
-//     }
-//     if (listen(sock_fd, 1) < 0)
-//     {
-//         close(sock_fd);
-//         ERROR_LOG("[Error]: Failed to listen at bound domain socket %s:%d\n", g_args.ip_address, g_args.port);
-//         return CODE_LISTEN_ERROR;
-//     }
-
-//     conn->fd_read = sock_fd;
-//     conn->fd_write = sock_fd;
-
-//     memcpy(g_connections->connections + g_connections->count, conn, sizeof(nsh_conn_t));
-//     g_connections->count++;
-
-//     VERBOSE_LOG("[Internal]: Initialized domain socket \"%s\"\n", g_args.domain_sock_path);
-//     pthread_mutex_unlock(&g_connections->lock);
-//     return CODE_OK;
-// }
-
-// err_code_e nsh_internal_abort_connection(nsh_conn_t* conn)
-// {
-//     if (conn->type == CONSOLE) { VERBOSE_LOG("[Notice]: Trying to abort CONSOLE connection, you can only close it\n"); return CODE_OK; }
-    
-//     if (shutdown(conn->fd_read, SHUT_RDWR)) { ERROR_LOG("[Warning]: Failed to shutdown connection %d\n", conn->id); }
-//     if (close(conn->fd_read)) { ERROR_LOG("[Warning]: Failed to close connection %d\n", conn->id); }
-//     VERBOSE_LOG("[Internal]: Aborted connection %d\n", conn->id);
-    
-//     err_code_e err = CODE_OK;
-//     conn->state = STATE_INACTIVE;
-//     if (conn->type == NETWORK)
-//     {
-//         char ip[INET_ADDRSTRLEN]; inet_ntop(AF_INET, &conn->network.local.sin_addr, ip, INET_ADDRSTRLEN);
-//         int port = ntohs(conn->network.local.sin_port);
-//         err = nsh_internal_init_network(ip, port, conn);
-//     }
-//     else if (conn->type == DOMAIN)
-//     {
-//         char path[PATH_MAX]; strcpy(path, conn->domain.addr.sun_path);
-//         err = nsh_internal_init_domain(path, conn);
-//     }
-
-//     return err;
-// }
-
-// err_code_e nsh_internal_accept(nsh_conn_t* conn)
-// {
-//     socklen_t client_length = sizeof(conn->network.remote);
-//     int sock_fd = accept(conn->fd_read, (struct sockaddr*)&conn->network.remote, &client_length);
-//     if (sock_fd < 0) { ERROR_LOG("[Error]: Failed to accept new connection at %d\n", conn->id); return CODE_ACCEPT; }
-//     if (close(conn->fd_read)) { ERROR_LOG("[Error]: Failed to close socket when promoting connection at %d\n", conn->id); return CODE_CLOSE; } // fd_write should be the same since we promoted the listening socket to well another listening sockete
-//     conn->state = STATE_ACTIVE;
-//     conn->fd_write = sock_fd;
-//     conn->fd_read = sock_fd;
-//     VERBOSE_LOG("[Log]: Accepted connection at %d\n", conn->id);
-//     return CODE_OK;
-// }
-
-// /* Commands exposed to the interpreter */
-// err_code_e nsh_command_abort(int conn_id)
-// {
-//     nsh_conn_t* conn = array_find_first(&g_connections->array, (array_find_func)find_connection_by_id, &conn_id);
-//     if (!conn) { VERBOSE_LOG("[Command]: Trying to abort nonexistant connection %d\n", conn_id); return CODE_OK; }
-//     return nsh_internal_abort_connection(conn);
-// }
-
 // err_code_e nsh_command_stat()
 // {
 //     char fd_read_buff[32], fd_write_buff[32];
