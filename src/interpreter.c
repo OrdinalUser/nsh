@@ -21,14 +21,55 @@ struct InterpreterState
 
 struct InterpreterState state;
 
+nsh_shell_e nsh_exec()
+{
+    pid_t pid, wpid;
+    int status;
+    char* args[] = {command_buff, NULL};
+
+    pid = fork();
+    switch (pid)
+    {
+    case -1:
+        return SHELL_FORK_FAILED;
+    case 0:
+        execvp(command_buff, args);
+        perror("shell::execvp error?");
+        exit((int)SHELL_EXEC_FAIL); // Indicates command nout found on POSIX & Bash
+    default:
+        do
+        {
+            wpid = waitpid(pid, &status, WUNTRACED);
+        } while(!WIFEXITED(status) && !WIFSIGNALED(status));
+        if (WIFEXITED(status))
+        {
+            int code = WEXITSTATUS(status);
+            printf("program exited with %d\n", code);
+            if (code == (int)SHELL_EXEC_FAIL) return SHELL_EXEC_FAIL;
+        }
+        return SHELL_OK;
+    }
+    return SHELL_OK; // This should be unreachable
+}
+
 nsh_shell_e nsh_run_command()
 {
-    if (strcmp(command_buff, "quit") == 0)
+    write(fileno(stdout), "\n", 1);
+    if (command_buff_size == 0)
+    {
+        return SHELL_OK;
+    }
+    else if (strcmp(command_buff, "quit") == 0)
         { state.running = false; return SHELL_EXIT; }
     else if (strcmp(command_buff, "reset") == 0)
         { state.running = false; return SHELL_RESET; }
-    sprintf(write_buff, "\n> cmd: %s\n", command_buff);
-    write(fileno(stdout), write_buff, strlen(write_buff));
+    else
+    {
+        // tmp, try run program as command
+        nsh_shell_e ret = nsh_exec(command_buff);
+        if (ret == SHELL_EXEC_FAIL)
+            printf("-nsh: command \"%s\" not found\n", command_buff);
+    }
 
     memset(command_buff, 0, BUFF_SIZE);
     command_buff_size = 0;

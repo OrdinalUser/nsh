@@ -3,7 +3,8 @@
 
 typedef enum NSH_SHELL_ERROR
 {
-    SHELL_OK, SHELL_EXIT, SHELL_RESET
+    SHELL_OK, SHELL_EXIT, SHELL_RESET,
+    SHELL_FORK_FAILED, SHELL_EXEC_FAIL = 127
 } nsh_shell_e;
 
 int nsh_interpreter();
