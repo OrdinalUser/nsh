@@ -16,7 +16,7 @@ clean:
 	rm -f $(PROJECT_EXE)
 
 run: $(PROJECT_EXE)
-	./$(PROJECT_EXE) $(PROG_FLAGS)
+	./$(PROJECT_EXE)
 
 run-server: $(PROJECT_EXE)
 	./$(PROJECT_EXE) -v -u ~/domain -l log.txt

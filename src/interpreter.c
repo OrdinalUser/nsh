@@ -1,5 +1,8 @@
 #include "interpreter.h"
 
+#include <sys/types.h>
+#include <sys/wait.h>
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -33,19 +36,35 @@ nsh_shell_e nsh_exec()
     case -1:
         return SHELL_FORK_FAILED;
     case 0:
+        struct sigaction sa = {0};
+        sa.sa_handler = SIG_DFL;
+        sigaction(SIGCHLD, &sa, NULL);
+        sigaction(SIGINT, &sa, NULL);
+        sigaction(SIGTERM, &sa, NULL);
+
+        sigset_t set;
+        sigemptyset(&set);
+        sigprocmask(SIG_SETMASK, &set, NULL);
+
         execvp(command_buff, args);
         perror("shell::execvp error?");
-        exit((int)SHELL_EXEC_FAIL); // Indicates command nout found on POSIX & Bash
+        exit((int)SHELL_EXEC_FAIL); // Indicates command not found on POSIX & Bash
     default:
-        do
-        {
-            wpid = waitpid(pid, &status, WUNTRACED);
-        } while(!WIFEXITED(status) && !WIFSIGNALED(status));
+        wpid = waitpid(pid, &status, 0);
+        
+        printf("status raw: %d\n", status);
+        printf("WIFEXITED: %d, WIFSIGNALED: %d\n", WIFEXITED(status), WIFSIGNALED(status));
+        
         if (WIFEXITED(status))
         {
-            int code = WEXITSTATUS(status);
+            // This branch literally never gets called even if ls returns 0?
+            const int code = WEXITSTATUS(status);
             printf("program exited with %d\n", code);
             if (code == (int)SHELL_EXEC_FAIL) return SHELL_EXEC_FAIL;
+        } else if (WIFSIGNALED(status))
+        {
+            const int sig = WTERMSIG(status);
+            printf("program was killed by signal %d\n", sig);
         }
         return SHELL_OK;
     }
