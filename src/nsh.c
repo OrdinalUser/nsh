@@ -101,6 +101,30 @@ char DEBUG_BUFF[DEBUG_BUFF_SIZE];
 #define ZERO_MEMORY(var) do { memset(&var, 0, sizeof(var)); } while (0)
 
 /* Various helpers */
+void nsh_signals_reset()
+{
+    signal(SIGINT, SIG_DFL);
+    signal(SIGTERM, SIG_DFL);
+
+    // Allow zombies, say Yes! to outbreaks
+    struct sigaction sa = {0};
+    sa.sa_handler = SIG_DFL;
+    sa.sa_flags = 0;
+    sigaction(SIGCHLD, &sa, NULL);
+}
+
+void nsh_signals_set()
+{
+    signal(SIGINT, nsh_exit);
+    signal(SIGTERM, nsh_exit);
+
+    // Prevent zombies, no outbreaks
+    struct sigaction sa = {0};
+    sa.sa_handler = SIG_DFL;
+    sa.sa_flags = SA_NOCLDWAIT;
+    sigaction(SIGCHLD, &sa, NULL);
+}
+
 // Needs to be mutex locked!
 nsh_conn_t* shared_mem_get_this_instance_entry()
 {
@@ -136,6 +160,12 @@ void nsh_internal_help()
 /* Internal functions */
 pid_t nsh_internal_start_instance(nsh_conn_t conn)
 {
+    // Allow zombies, say Yes! to outbreaks
+    struct sigaction sa = {0};
+    sa.sa_handler = SIG_DFL;
+    sa.sa_flags = SA_NOCLDWAIT | SA_RESETHAND;
+    sigaction(SIGCHLD, &sa, NULL);
+
     pid_t pid = fork();
     switch (pid)
     {
@@ -624,12 +654,6 @@ nsh_err_e nsh_instance_init()
     nsh_err_e err = nsh_instance_shm_init();
     if (err != CODE_OK) return err;
 
-    // Prevent zombies, no outbreaks
-    struct sigaction sa = {0};
-    sa.sa_handler = SIG_DFL;
-    sa.sa_flags = SA_NOCLDWAIT;
-    sigaction(SIGCHLD, &sa, NULL);
-
     // Spawns additional instances
     nsh_conn_t instances[2] = {0};
     size_t instCnt = 0;
@@ -831,14 +855,13 @@ void nsh_exit(int code)
 
 int nsh(int argc, char** argv)
 {
-    signal(SIGINT, nsh_exit);
-    signal(SIGTERM, nsh_exit);
+    
+    nsh_signals_set();
 
     nsh_args_parse(argc-1, argv+1);
     nsh_err_e err = g_args.client ? nsh_client() : nsh_instance();
 
-    signal(SIGINT, SIG_DFL);
-    signal(SIGTERM, SIG_DFL);
+    nsh_signals_reset();
     nsh_cleanup();
 
     return (int)err;

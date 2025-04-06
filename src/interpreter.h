@@ -8,5 +8,7 @@ typedef enum NSH_SHELL_ERROR
 } nsh_shell_e;
 
 int nsh_interpreter();
+void nsh_signals_reset();
+void nsh_signals_set();
 
 #endif

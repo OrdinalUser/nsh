@@ -24,47 +24,47 @@ struct InterpreterState
 
 struct InterpreterState state;
 
-nsh_shell_e nsh_exec()
+nsh_shell_e nsh_exec(char* program, int* exit_code)
 {
     pid_t pid, wpid;
-    int status;
-    char* args[] = {command_buff, NULL};
+    int status = -69;
+    char* args[] = {program, NULL};
+
+    // Save nsh signals - there must always be at least one retarded thing
+    nsh_signals_reset();
+    struct sigaction sa = {0};
+    sa.sa_handler = SIG_DFL;
+    sa.sa_flags = 0;
+    sigaction(SIGCHLD, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
 
     pid = fork();
     switch (pid)
     {
     case -1:
+        nsh_signals_set();
         return SHELL_FORK_FAILED;
     case 0:
-        struct sigaction sa = {0};
-        sa.sa_handler = SIG_DFL;
-        sigaction(SIGCHLD, &sa, NULL);
-        sigaction(SIGINT, &sa, NULL);
-        sigaction(SIGTERM, &sa, NULL);
-
-        sigset_t set;
-        sigemptyset(&set);
-        sigprocmask(SIG_SETMASK, &set, NULL);
-
-        execvp(command_buff, args);
-        perror("shell::execvp error?");
+        execvp(program, args);
         exit((int)SHELL_EXEC_FAIL); // Indicates command not found on POSIX & Bash
     default:
         wpid = waitpid(pid, &status, 0);
-        
-        printf("status raw: %d\n", status);
-        printf("WIFEXITED: %d, WIFSIGNALED: %d\n", WIFEXITED(status), WIFSIGNALED(status));
-        
+        if (wpid == -1)
+        {
+            perror("waitpid failed????\n");
+        }
+        nsh_signals_set();
+
         if (WIFEXITED(status))
         {
             // This branch literally never gets called even if ls returns 0?
             const int code = WEXITSTATUS(status);
-            printf("program exited with %d\n", code);
+            *exit_code = code;
             if (code == (int)SHELL_EXEC_FAIL) return SHELL_EXEC_FAIL;
         } else if (WIFSIGNALED(status))
         {
             const int sig = WTERMSIG(status);
-            printf("program was killed by signal %d\n", sig);
         }
         return SHELL_OK;
     }
@@ -85,7 +85,8 @@ nsh_shell_e nsh_run_command()
     else
     {
         // tmp, try run program as command
-        nsh_shell_e ret = nsh_exec(command_buff);
+        int exit_code;
+        nsh_shell_e ret = nsh_exec(command_buff, &exit_code);
         if (ret == SHELL_EXEC_FAIL)
             printf("-nsh: command \"%s\" not found\n", command_buff);
     }
