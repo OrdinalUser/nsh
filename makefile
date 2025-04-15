@@ -1,9 +1,9 @@
 CC = gcc
-CFFLAGS = -Wall
+CFFLAGS = -Wall -g
 
 PROJECT_NAME=nsh
 SRC=src
-SRCS=$(SRC)/main.c $(SRC)/nsh.c $(SRC)/array.c $(SRC)/interpreter.c $(SRC)/nsh_lexer.c
+SRCS=$(SRC)/main.c $(SRC)/nsh.c $(SRC)/array.c $(SRC)/interpreter.c $(SRC)/nsh_lexer.c $(SRC)/nsh_parser.c
 BIN_FOLDER=bin
 PROJECT_EXE=$(BIN_FOLDER)/$(PROJECT_NAME)
 
