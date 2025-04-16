@@ -201,7 +201,7 @@ nsh_shell_e nsh_run_command()
             if (chain.count == 1)
             {
                 nsh_shell_e isBuiltIn = nsh_exec_native(cmd);
-                if (isBuiltIn == SHELL_OK) { parser_chain_free(&chain); continue; }
+                if (isBuiltIn == SHELL_OK) break;
                 else if (isBuiltIn != SHELL_NOT_NATIVE) { parser_chain_free(&chain); return isBuiltIn; }
             }
 

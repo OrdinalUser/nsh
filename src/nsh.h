@@ -55,7 +55,7 @@ typedef struct NshConnection
     {
         struct {
             char ip_from[INET_ADDRSTRLEN], ip_to[INET_ADDRSTRLEN];
-            short port_from, port_to;
+            unsigned short port_from, port_to;
         } network;
         struct
         {

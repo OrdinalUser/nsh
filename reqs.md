@@ -59,7 +59,7 @@ sokety, spojenia // thanks for being specific yet again
 | Id | Points | Text |
 |-|-|-|
 + | 1. | 2 | Neinteraktívny režim - "shell" bude spracovávať aj príkazy v zadaných súboroch (skript).
-| 3. | 3 | Interný príkaz stat vypíše zoznam všetkých aktuálnych spojení na ktorých prijíma príkazy, prípadne aj všetky sokety na ktorých prijíma nové spojenia.
++ | 3. | 3 | Interný príkaz stat vypíše zoznam všetkých aktuálnych spojení na ktorých prijíma príkazy, prípadne aj všetky sokety na ktorých prijíma nové spojenia.
 | 4. | 2 | Interný príkaz abort n ukončí zadané spojenie.
 | 5. | 4 | Interné príkazy listen a close (s príslušnými argumentami) pre otvorenie a zatvorenie soketu pre prijímanie spojení.
 + | 7. | 2 | S prepínačom "-i" bude možné zadať aj IP adresu na ktorej bude program očakávať spojenia (nielen port).
