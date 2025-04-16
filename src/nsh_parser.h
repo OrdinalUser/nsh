@@ -16,9 +16,7 @@ typedef struct NSH_COMMAND_CHAIN {
     size_t count;
 } nsh_command_chain_t;
 
-nsh_command_chain_t* parser(nsh_token_t* tokens);
-
-nsh_command_chain_t parser_advance(const char* command, char** saveptr);
+nsh_command_chain_t parser_advance(char* command, char** saveptr);
 bool parser_chain_validate(nsh_command_chain_t* chain);
 void parser_chain_free(nsh_command_chain_t* chain);
 

@@ -1,7 +1,10 @@
+#include "globals.h"
+
 #include "interpreter.h"
 #include "nsh_lexer.h"
 #include "nsh_parser.h"
-
+#include <sys/mman.h>
+#include <pthread.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <fcntl.h>
@@ -11,15 +14,19 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
+#include <arpa/inet.h>
+#include <sys/stat.h>
+
 #include <unistd.h>
 
 #include "array.h"
+
+#include <poll.h>
 
 #define BUFF_SIZE 65536
 static char buff[BUFF_SIZE];
 static char command_buff[BUFF_SIZE];
 static size_t command_buff_size = 0;
-static char write_buff[BUFF_SIZE];
 static char temp_buff[BUFF_SIZE];
 
 struct InterpreterState
@@ -28,6 +35,51 @@ struct InterpreterState
 };
 
 struct InterpreterState state;
+
+nsh_shell_e nsh_command_stat()
+{
+    char msgbuff[256];
+
+    printf("|=== NSH : Stat =========================================================|\n");
+    printf("| ID  | State  | Type    | Additional info                               |\n");
+    printf("|-----|--------|---------|-----------------------------------------------|\n");
+    
+    pthread_mutex_lock(&shared_mem->lock);
+    for (size_t i = 0; i < shared_mem->count; i++)
+    {
+        nsh_conn_t* conn = shared_mem->connections + i;
+        const char* conn_type_str = NSH_CONNECTION_TYPE_STR[conn->type];
+        const char* state_str = conn->state == STATE_INACTIVE ? "Idle" : "Active";
+
+        if (conn->type == CONSOLE)
+        {
+            printf("| %-3.3d | %-6.6s | %-7.7s | %-45.45s |\n", conn->id, state_str, conn_type_str, "");
+        }
+        else if (conn->type == NETWORK)
+        {
+            if (conn->state == STATE_ACTIVE)
+                snprintf(msgbuff, 256, "%s:%d -> %s:%d", conn->network.ip_from, conn->network.port_from, conn->network.ip_to, conn->network.port_to);
+            else
+                msgbuff[0] = 0;
+            printf("| %-3.3d | %-6.6s | %-7.7s | %-45.45s |\n", conn->id, state_str, conn_type_str, msgbuff);
+        }
+        else if (conn->type == DOMAIN)
+        {
+            if (conn->state == STATE_ACTIVE)
+                printf("| %-3.3d | %-6.6s | %-7.7s | %-45.45s |\n", conn->id, state_str, conn_type_str, conn->domain.path);
+            else
+                printf("| %-3.3d | %-6.6s | %-7.7s | %-45.45s |\n", conn->id, state_str, conn_type_str, "");
+        }
+        else
+        {
+            printf("| %-3.3d | %-6.6s | %-7.7s | %-45.45s |\n", conn->id, state_str, conn_type_str, "Expect a crash :)");
+        }
+    }
+    printf("|========================================================================|\n");
+    
+    pthread_mutex_unlock(&shared_mem->lock);
+    return SHELL_OK;
+}
 
 nsh_shell_e nsh_exec(char* program, int* exit_code)
 {
@@ -70,6 +122,7 @@ nsh_shell_e nsh_exec(char* program, int* exit_code)
         } else if (WIFSIGNALED(status))
         {
             const int sig = WTERMSIG(status);
+            fprintf(stderr, "[Error]: Killed by signal %d\n", sig);
         }
         return SHELL_OK;
     }
@@ -90,6 +143,14 @@ nsh_shell_e nsh_exec_native(nsh_command_t* cmd)
         else if (chdir(*cmd->flags) != 0) {
             fprintf(stdout, "-nsh: cd failed to change directory\n");
         }
+        return SHELL_OK;
+    }
+    else if (strcmp(cmd->cmd, "stat") == 0) {
+        nsh_command_stat();
+        return SHELL_OK;
+    }
+    else if (strcmp(cmd->cmd, "help") == 0) {
+        nsh_internal_help();
         return SHELL_OK;
     }
 
@@ -140,8 +201,8 @@ nsh_shell_e nsh_run_command()
             if (chain.count == 1)
             {
                 nsh_shell_e isBuiltIn = nsh_exec_native(cmd);
-                if (isBuiltIn == SHELL_OK) continue;
-                else if (isBuiltIn != SHELL_NOT_NATIVE) return isBuiltIn;
+                if (isBuiltIn == SHELL_OK) { parser_chain_free(&chain); continue; }
+                else if (isBuiltIn != SHELL_NOT_NATIVE) { parser_chain_free(&chain); return isBuiltIn; }
             }
 
             if (i < chain.count - 1)
@@ -151,6 +212,7 @@ nsh_shell_e nsh_run_command()
                     perror("pipe failed????\n");
                     memset(command_buff, 0, BUFF_SIZE);
                     command_buff_size = 0;
+                    parser_chain_free(&chain);
                     return SHELL_PIPELINE_FAIL;
                 }
             }
@@ -188,7 +250,7 @@ nsh_shell_e nsh_run_command()
                     int fd = open(cmd->input_file, O_RDONLY);
                     if (fd == -1)
                     {
-                        fprintf("-nsh: couldn't open file \"%s\" during redirection\n", cmd->input_file);
+                        fprintf(stderr, "-nsh: couldn't open file \"%s\" during redirection\n", cmd->input_file);
                         exit(-1);
                     }
                     dup2(fd, STDIN_FILENO);
@@ -205,7 +267,7 @@ nsh_shell_e nsh_run_command()
                     int fd = open(cmd->output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
                     if (fd == -1)
                     {
-                        fprintf("-nsh: couldn't create file \"%s\" for redirection\n", cmd->output_file);
+                        fprintf(stderr, "-nsh: couldn't create file \"%s\" for redirection\n", cmd->output_file);
                         goto loop_end;
                     }
                     dup2(fd, STDOUT_FILENO);
@@ -242,16 +304,15 @@ nsh_shell_e nsh_run_command()
                 else if (WIFSIGNALED(status))
                 {
                     const int sig = WTERMSIG(status);
+                    fprintf(stderr, "[Error]: Killed by signal %d\n", sig);
                 }
                 break;
             }
 
             // Free arguments
-            // for (size_t i = 0; i < argc; i++)
-            // {
-            //     free(array_at(&args, i));
-            // }
-            // array_destroy(&args);
+            for (size_t i = 0; i < args.length-1; i++)
+                free(*(char**)array_at(&args, i));
+            array_destroy(&args);
         }
 loop_end:
         parser_chain_free(&chain);
@@ -276,6 +337,15 @@ int nsh_interpreter()
     while (state.running)
     {
         memset(buff, 0, BUFF_SIZE);
+
+        struct pollfd fds[1];
+        fds[0].fd = fileno(stdin);
+        fds[0].events = POLLIN | POLLHUP | POLLERR | POLLNVAL;
+
+        int ret = poll(fds, 1, g_args.timeout);
+        if (ret == -1 || ret == 0) break;
+        if (fds[0].revents & POLLHUP || fds[0].revents & POLLERR || fds[0].revents & POLLNVAL) break;
+
         ssize_t readBytes = read(fileno(stdin), buff, BUFF_SIZE);
         
         if (readBytes == 0) break; // Connection closed on us
@@ -291,8 +361,9 @@ int nsh_interpreter()
                     if (err != SHELL_OK) { printf("shell err: %d\n", err); return err; }
 
                     getcwd(temp_buff, BUFF_SIZE);
-                    sprintf(write_buff, "%s# ", temp_buff);
-                    write(fileno(stdout), write_buff, strlen(write_buff));
+                    
+                    write(fileno(stdout), temp_buff, strlen(temp_buff));
+                    write(fileno(stdout), "# ", 2);
                 }
                 else
                 {
@@ -304,9 +375,10 @@ int nsh_interpreter()
                     // Send prompt over so the client knows it's their time to shine
                     // Server side echo for when gathering queries
                     getcwd(temp_buff, BUFF_SIZE);
-                    sprintf(write_buff, "\r%s# ", temp_buff);
-                    snprintf(write_buff + strlen(write_buff), command_buff_size+1, "%s", command_buff);
-                    write(fileno(stdout), write_buff, strlen(write_buff));
+                    write(fileno(stdout), "\r", 1);
+                    write(fileno(stdout), temp_buff, strlen(temp_buff));
+                    write(fileno(stdout), "# ", 2);
+                    write(fileno(stdout), command_buff, strlen(command_buff));
                 }
             }
         }

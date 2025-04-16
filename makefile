@@ -1,9 +1,9 @@
 CC = gcc
-CFFLAGS = -Wall -g
+CFFLAGS = -Wall -g -fsanitize=address,undefined -fno-omit-frame-pointer -O1
 
 PROJECT_NAME=nsh
 SRC=src
-SRCS=$(SRC)/main.c $(SRC)/nsh.c $(SRC)/array.c $(SRC)/interpreter.c $(SRC)/nsh_lexer.c $(SRC)/nsh_parser.c
+SRCS=$(SRC)/main.c $(SRC)/nsh.c $(SRC)/array.c $(SRC)/interpreter.c $(SRC)/nsh_lexer.c $(SRC)/nsh_parser.c $(SRC)/globals.c
 BIN_FOLDER=bin
 PROJECT_EXE=$(BIN_FOLDER)/$(PROJECT_NAME)
 
@@ -31,3 +31,6 @@ sync:
 	git fetch
 	git reset --hard HEAD
 	git pull
+
+debug: $(PROJECT_EXE)
+	ASAN_OPTIONS=fast_unwind_on_malloc=0:abort_on_error=1 ./$(PROJECT_EXE)

@@ -33,9 +33,9 @@ Deadline: 9. cvicenie - tbd - TODO
 # Minimum capabilities
 ## Other
 Spracovanie argumentov, spracovanie zadaneho vstupneho riadku, interne prikazy
-- help
++ help
 - halt
-- quit
++ quit
 ## Program management
 Overenie cinnosti a spusutenie zadanych prikazov, presmerovanie
 - fork
@@ -58,13 +58,13 @@ sokety, spojenia // thanks for being specific yet again
 # Additional requirements
 | Id | Points | Text |
 |-|-|-|
-| 1. | 2 | Neinteraktívny režim - "shell" bude spracovávať aj príkazy v zadaných súboroch (skript).
++ | 1. | 2 | Neinteraktívny režim - "shell" bude spracovávať aj príkazy v zadaných súboroch (skript).
 | 3. | 3 | Interný príkaz stat vypíše zoznam všetkých aktuálnych spojení na ktorých prijíma príkazy, prípadne aj všetky sokety na ktorých prijíma nové spojenia.
 | 4. | 2 | Interný príkaz abort n ukončí zadané spojenie.
-| 5. | 4 | Interné príkazy listen a close (s príslušnými argumentami) pre otvorenie a  zatvorenie soketu pre prijímanie spojení.
-| 7. | 2 | S prepínačom "-i" bude možné zadať aj IP adresu na ktorej bude program očakávať spojenia (nielen port).
-| 12. | 5 | Ak je niektoré spojenie nečinné zadanú dobu, bude zrušené.
-| 13. | 1 | Doba nečinnosti z predchádzajúceho bodu môže byť zadaná za argumentom "-t" a/alebo ako premenná prostredia.
-| 14. | 1 | S prepínačom "-v" sa budú zobrazovať pomocné (debugg-ovacie) výpisy na štandardný chybový výstup (stderr).
-| 18. | 2 | Program s prepínačom "-l" a menom súboru bude do neho zapisovať záznamy o vykonávaní príkazov (log-y).
-| 21. | 2 | Funkčný Makefile.
+| 5. | 4 | Interné príkazy listen a close (s príslušnými argumentami) pre otvorenie a zatvorenie soketu pre prijímanie spojení.
++ | 7. | 2 | S prepínačom "-i" bude možné zadať aj IP adresu na ktorej bude program očakávať spojenia (nielen port).
++ | 12. | 5 | Ak je niektoré spojenie nečinné zadanú dobu, bude zrušené.
++ | 13. | 1 | Doba nečinnosti z predchádzajúceho bodu môže byť zadaná za argumentom "-t" a/alebo ako premenná prostredia.
++ | 14. | 1 | S prepínačom "-v" sa budú zobrazovať pomocné (debugg-ovacie) výpisy na štandardný chybový výstup (stderr).
++ | 18. | 2 | Program s prepínačom "-l" a menom súboru bude do neho zapisovať záznamy o vykonávaní príkazov (log-y).
++ | 21. | 2 | Funkčný Makefile.

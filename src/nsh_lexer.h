@@ -16,10 +16,6 @@ typedef struct NSH_TOKEN
     char* value;
 } nsh_token_t;
 
-// Returns a list of tokens
-// Consumer is liable for freeing the memory
-nsh_token_t* lexer(const char* command);
-
 nsh_token_t lexer_advance(char* start, char** saveptr, bool* cmdFlag);
 
 const char* nsh_lexer_enum_str(nsh_token_e tokenType);

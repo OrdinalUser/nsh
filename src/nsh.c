@@ -1,5 +1,6 @@
 #include "nsh.h"
 #include "interpreter.h"
+#include "globals.h"
 
 /* libc includes */
 #include <stddef.h>
@@ -23,62 +24,6 @@
 #include <sys/mman.h>
 #include <pthread.h>
 #include <termios.h>
-
-/* Default config */
-#define NSH_INITIAL_PORT 8888
-#define NSH_INITIAL_IP_INTERFACE "0.0.0.0"
-#define NSH_INITIAL_TIMEOUT 60
-
-#define NSH_MAX_CONNECTIONS_COUNT 64
-#define NSH_CLIENT_BUFFER_SIZE 65536
-#define NSH_SHARED_MEM_NAME "/nsh"
-
-/* Types */
-struct nsh_args
-{
-    char* ip_address;
-    int port;
-    char script_file[PATH_MAX];
-    char* log_file;
-    char* domain_sock_path;
-    int timeout;
-    bool help, verbose;
-    bool network, client;
-};
-
-struct nsh_client_state
-{
-    nsh_conn_t connection;
-    int fd;
-    bool running;
-    char* buffer;
-};
-
-struct nsh_shared_connections
-{
-    pthread_mutex_t lock;
-    size_t next_id;
-    size_t count, capacity;
-    nsh_conn_t connections[NSH_MAX_CONNECTIONS_COUNT];
-};
-#define NSH_SHARED_MEM_SIZE sizeof(struct nsh_shared_connections)
-
-struct nsh_instance_state
-{
-    nsh_conn_t connection;
-    int sock_fd;
-};
-
-/* Lookups */
-const char* NSH_CONNECTION_TYPE_STR[] = {
-    "CONSOLE", "NETWORK", "DOMAIN"
-};
-
-/* Globals */
-struct nsh_args g_args = {0};
-struct nsh_client_state client = {.running = true };
-struct nsh_instance_state instance = {0}; // Contains the original connection entry for each instance
-struct nsh_shared_connections* shared_mem;
 
 /* Logging, macros and debug things */
 #define VERBOSE_LOG(format, ...) \
@@ -400,10 +345,6 @@ void nsh_args_parse(int argc, char** argv)
             else fprintf(stderr, "Encountered unknown arg: '%s', use - to prefix flags\n", arg);
         }
     }
-    if (g_args.script_file[0] != '\0' && !g_args.domain_sock_path && !g_args.network)
-    {
-        g_args.client = true;
-    }
 }
 
 /* Core of NSHell */
@@ -549,7 +490,7 @@ nsh_err_e nsh_client()
         struct pollfd fds[2] = {{fileno(stdin), POLLIN, 0}, {client.fd, POLLIN, 0}};
         memset(client.buffer, 0, NSH_CLIENT_BUFFER_SIZE);
 
-        int errpoll = poll(fds, 2, g_args.timeout);
+        poll(fds, 2, g_args.timeout);
         if (fds[0].revents & POLLIN)
         {
             // Send over client data from stdin
@@ -637,6 +578,8 @@ nsh_err_e nsh_instance_shm_init()
 // Prepares connections and starts instances for each additional connections
 nsh_err_e nsh_instance_init()
 {
+    if (g_args.script_file[0] != 0) freopen(g_args.script_file, "r", stdin);
+
     if (g_args.log_file)
     {
         FILE* flog = fopen(g_args.log_file, "w+");
@@ -724,6 +667,10 @@ nsh_err_e nsh_instance_accept()
         dup2(instance.sock_fd, STDIN_FILENO);
         dup2(instance.sock_fd, STDOUT_FILENO);
 
+        const char* ipStr = inet_ntoa(addr_in.sin_addr);
+        strcpy(instance.connection.network.ip_from, ipStr);
+        instance.connection.network.port_from = ntohs(addr_in.sin_port);
+
         shared_mem_update_instance();
         VERBOSE_LOG("[Log]: Accepted network connection at %d\n", instance.connection.id);
         break;
@@ -768,16 +715,19 @@ nsh_err_e nsh_instance()
     {
         fflush(stdin);
         fflush(stdout);
-        err = nsh_interpreter();
-        if (err == SHELL_RESET)
+        nsh_shell_e shErr = nsh_interpreter();
+        if (shErr == SHELL_RESET)
         {
+            // We've finished the script, exit
+            if (g_args.script_file[0] != 0) return SHELL_OK;
+
             VERBOSE_LOG("[Instance]: Client disconnected from connection %d\n", instance.connection.id);
-            err = nsh_internal_reset_connection();
-            if (err != CODE_OK) return err;
-            err = nsh_instance_accept();
-            if (err != CODE_OK) return err;
+            shErr = nsh_internal_reset_connection();
+            if (shErr != SHELL_OK) return (int)err;
+            shErr = nsh_instance_accept();
+            if (shErr != SHELL_OK) return (int)err;
         }
-        else if (err == SHELL_EXIT) break;
+        else if (shErr == SHELL_EXIT) return CODE_OK;
     } while (true);
 
     return err;
@@ -855,7 +805,6 @@ void nsh_exit(int code)
 
 int nsh(int argc, char** argv)
 {
-    
     nsh_signals_set();
 
     nsh_args_parse(argc-1, argv+1);
@@ -866,52 +815,3 @@ int nsh(int argc, char** argv)
 
     return (int)err;
 }
-
-/* Deal with later */
-// err_code_e nsh_command_stat()
-// {
-//     char fd_read_buff[32], fd_write_buff[32];
-
-//     printf("|=== NSH : Stat =========================================================|\n");
-//     printf("| ID  | State  | Type    | From                  | To                    |\n");
-//     printf("|-----|--------|---------|-----------------------|-----------------------|\n");
-//     for (size_t i = 0; i < g_connections->array.length; i++)
-//     {
-//         nsh_conn_t* conn = array_at(&g_connections->array, i);
-//         const char* conn_type_str = NSH_CONNECTION_TYPE_STR[conn->type];
-//         const char* fd_read_name, *fd_write_name;
-//         const char* state_str = conn->state == STATE_INACTIVE ? "Idle" : "Active";
-
-//         if (conn->type == CONSOLE)
-//         {
-//             if (conn->fd_read == 0) fd_read_name = "STDIN";
-//             else {sprintf(fd_read_buff, "%d", conn->fd_read); fd_read_name = fd_read_buff; }
-//             if (conn->fd_write == 1) fd_write_name = "STDOUT ";
-//             else if (conn->fd_write == 2) fd_write_name = "STDERR";
-//             else {sprintf(fd_write_buff, "%d", conn->fd_write); fd_write_name = fd_write_buff; }
-//         }
-//         else if (conn->type == NETWORK)
-//         {
-//             inet_ntop(AF_INET, &conn->network.local.sin_addr, fd_read_buff, INET_ADDRSTRLEN);
-//             sprintf(fd_read_buff+strlen(fd_read_buff), ":%d", ntohs(conn->network.local.sin_port));
-//             inet_ntop(AF_INET, &conn->network.remote.sin_addr, fd_write_buff, INET_ADDRSTRLEN);
-//             sprintf(fd_write_buff+strlen(fd_write_buff), ":%d", ntohs(conn->network.remote.sin_port));
-//             fd_read_name = fd_write_buff    ;
-//             fd_write_name = fd_read_buff;
-//         }
-//         else if (conn->type == DOMAIN)
-//         {
-//             fd_read_name = conn->domain.addr.sun_path;
-//             fd_write_name = conn->domain.addr.sun_path;
-//         }
-//         else
-//         {
-//             fd_read_name = "Expect a crash :/";
-//             fd_write_name = "Expect a crash :/";
-//         }
-
-//         printf("| %-3.3d | %-6.6s | %-7.7s | %-21.21s | %-21.21s |\n", conn->id, state_str, conn_type_str, fd_read_name, fd_write_name);
-//     }
-//     printf("|========================================================================|\n");
-//     return CODE_OK;
-// }

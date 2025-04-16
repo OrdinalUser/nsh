@@ -14,6 +14,15 @@
 #define DOMAIN_FILEPATH_LENGTH ((sizeof((struct sockaddr_un*)0)->sun_path))
 #define DOMAIN_FILEPATH_STR_MAX ((sizeof((struct sockaddr_un*)0)->sun_path) - 1)
 
+/* Default config */
+#define NSH_INITIAL_PORT 8888
+#define NSH_INITIAL_IP_INTERFACE "0.0.0.0"
+#define NSH_INITIAL_TIMEOUT 60000
+
+#define NSH_MAX_CONNECTIONS_COUNT 64
+#define NSH_CLIENT_BUFFER_SIZE 65536
+#define NSH_SHARED_MEM_NAME "/nsh"
+
 typedef enum NshError
 {
     CODE_OK = 0,
@@ -56,7 +65,44 @@ typedef struct NshConnection
 
 } nsh_conn_t;
 
-void nsh_exit();
+struct nsh_args
+{
+    char* ip_address;
+    int port;
+    char script_file[PATH_MAX];
+    char* log_file;
+    char* domain_sock_path;
+    int timeout;
+    bool help, verbose;
+    bool network, client;
+};
+
+struct nsh_client_state
+{
+    nsh_conn_t connection;
+    int fd;
+    bool running;
+    char* buffer;
+};
+
+struct nsh_shared_connections
+{
+    pthread_mutex_t lock;
+    size_t next_id;
+    size_t count, capacity;
+    nsh_conn_t connections[NSH_MAX_CONNECTIONS_COUNT];
+};
+#define NSH_SHARED_MEM_SIZE sizeof(struct nsh_shared_connections)
+
+struct nsh_instance_state
+{
+    nsh_conn_t connection;
+    int sock_fd;
+};
+
+void nsh_internal_help();
+
+void nsh_exit(int code);
 int nsh(int argc, char** argv);
 
 #endif

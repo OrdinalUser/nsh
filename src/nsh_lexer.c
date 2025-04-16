@@ -25,7 +25,7 @@ const char* nsh_lexer_enum_str(nsh_token_e tokenType)
 #include "array.h"
 
 // Replacement for strtok
-char* advance(const char* start, char delim, char** saveptr)
+char* advance(char* start, char delim, char** saveptr)
 {
     if (start) *saveptr = start;
     if (**saveptr == 0) return NULL;
@@ -48,48 +48,6 @@ char* advance(const char* start, char delim, char** saveptr)
         *saveptr = *c ? c+1 : c;
     }
     return tok_start;
-}
-
-nsh_token_t* lexer(const char* command)
-{
-    char* saveptr;
-    //char* token = strtok_r(command, " ", &saveptr);
-
-    array_t tokens; array_create(&tokens, 64, sizeof(nsh_token_t));
-    bool cmd_tokenized = false;
-    char* token = advance(command, ' ', &saveptr);
-    while (token)
-    {
-        size_t len = strlen(token);
-        if (token[len-1] == '\n') token[len---1] = 0; 
-
-        nsh_token_t tok = {.type = NSH_TOKEN_EOF, .value = token};
-        if (strcmp(token, "<") == 0) { tok.type = NSH_TOKEN_INPUT_REDIRECTION; tok.value = advance(NULL, ' ', &saveptr); }
-        else if (strcmp(token, ">") == 0) { tok.type = NSH_TOKEN_OUTPUT_REDIRECTION; tok.value = advance(NULL, ' ', &saveptr); }
-        else if (strcmp(token, "|") == 0) { tok.type = NSH_TOKEN_PIPE; cmd_tokenized = false; }
-        else if (strcmp(token, ";") == 0) { tok.type = NSH_TOKEN_CMD_END; cmd_tokenized = false; }
-        else {
-            // String value token
-            if (token[0] == '#') {tok.type = NSH_TOKEN_COMMENT; continue; }
-
-            int start = 0, end = strlen(token);
-            if (token[0] == '"' && token[end-1] == '"')
-            {
-                token[0] = 0;
-                token[end-1] = 0;
-                tok.value++;
-            }
-            if (cmd_tokenized) tok.type = NSH_TOKEN_FLAG;
-            else { tok.type = NSH_TOKEN_CMD; cmd_tokenized = true; }
-        }
-        array_push(&tokens, &tok);
-        //token = strtok_r(NULL, " ", &saveptr);
-        token = advance(NULL, ' ', &saveptr);
-    }
-    nsh_token_t end_tok = {.value = "", .type = NSH_TOKEN_EOF};
-    array_push(&tokens, &end_tok);
-
-    return tokens.base;
 }
 
 char* next_string(char* start, char delim, char** saveptr)
