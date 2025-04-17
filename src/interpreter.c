@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <signal.h>
 
+#include <time.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -17,6 +18,7 @@
 
 #include <arpa/inet.h>
 #include <sys/stat.h>
+#include <pwd.h>
 
 #include <unistd.h>
 
@@ -486,6 +488,34 @@ loop_end:
     return SHELL_OK;
 }
 
+void nsh_make_prompt(char* buff, size_t buffSize, const char* cmd)
+{
+    // '16:34 user17@student#'
+    
+    // Get time
+    time_t rawTime;
+    struct tm* timeInfo;
+    char time_str[6];
+
+    time(&rawTime);
+    timeInfo = localtime(&rawTime);
+    strftime(time_str, sizeof(time_str), "%H:%M", timeInfo);
+
+    // Get username
+    const char* username = getenv("USER");
+    if (!username)
+    {
+        struct passwd* pw = getpwuid(getuid());
+        if (pw) username = pw->pw_name;
+        else username = "unknown";
+    }
+
+    // Get hostname
+    char hostname[256];
+    gethostname(hostname, sizeof(hostname));
+    snprintf(buff, buffSize, "\r%s %s@%s# %s", time_str, username, hostname, cmd);
+}
+
 int nsh_interpreter()
 {
     command_buff_size = 0;
@@ -522,10 +552,12 @@ int nsh_interpreter()
                     nsh_shell_e err = nsh_run_command(command_buff);
                     if (err != SHELL_OK) { printf("shell err: %d\n", err); return err; }
 
-                    getcwd(temp_buff, BUFF_SIZE);
+                    // getcwd(temp_buff, BUFF_SIZE);
                     
+                    // write(fileno(stdout), temp_buff, strlen(temp_buff));
+                    // write(fileno(stdout), "# ", 2);
+                    nsh_make_prompt(temp_buff, BUFF_SIZE, "");
                     write(fileno(stdout), temp_buff, strlen(temp_buff));
-                    write(fileno(stdout), "# ", 2);
                 }
                 else
                 {
@@ -536,11 +568,13 @@ int nsh_interpreter()
                     
                     // Send prompt over so the client knows it's their time to shine
                     // Server side echo for when gathering queries
-                    getcwd(temp_buff, BUFF_SIZE);
-                    write(fileno(stdout), "\r", 1);
+                    // getcwd(temp_buff, BUFF_SIZE);
+                    // write(fileno(stdout), "\r", 1);
+                    // write(fileno(stdout), temp_buff, strlen(temp_buff));
+                    // write(fileno(stdout), "# ", 2);
+                    // write(fileno(stdout), command_buff, strlen(command_buff));
+                    nsh_make_prompt(temp_buff, BUFF_SIZE, command_buff);
                     write(fileno(stdout), temp_buff, strlen(temp_buff));
-                    write(fileno(stdout), "# ", 2);
-                    write(fileno(stdout), command_buff, strlen(command_buff));
                 }
             }
         }

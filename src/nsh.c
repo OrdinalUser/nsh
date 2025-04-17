@@ -59,6 +59,7 @@ void nsh_signals_reset()
     signal(SIGINT, SIG_DFL);
     signal(SIGTERM, SIG_DFL);
     signal(SIGUSR1, SIG_DFL);
+    signal(SIGPIPE, SIG_DFL);
 
     // Allow zombies, say Yes! to outbreaks
     struct sigaction sa = {0};
@@ -72,6 +73,7 @@ void nsh_signals_set()
     signal(SIGINT, nsh_exit);
     signal(SIGTERM, nsh_exit);
     signal(SIGUSR1, nsh_sig_abort);
+    signal(SIGPIPE, nsh_exit);
 
     // Prevent zombies, no outbreaks
     struct sigaction sa = {0};

@@ -1,5 +1,5 @@
 CC = gcc
-CFFLAGS = -Wall -g -fsanitize=address,undefined -fno-omit-frame-pointer -O1
+CFFLAGS = -Wall -Werror -g -fsanitize=address,undefined -fno-omit-frame-pointer -O1
 
 PROJECT_NAME=nsh
 SRC=src
