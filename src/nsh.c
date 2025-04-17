@@ -140,12 +140,6 @@ pid_t nsh_internal_start_instance(nsh_conn_t conn)
 
 nsh_err_e nsh_register_instance()
 {
-    if (instance.connection.type == CONSOLE)
-    {
-        instance.connection.id = -1;
-        return CODE_OK;
-    }
-
     pthread_mutex_lock(&shared_mem->lock);
     if (shared_mem->count >= shared_mem->capacity)
     {
@@ -171,6 +165,7 @@ nsh_err_e nsh_internal_reset_connection()
     {
     case CONSOLE:
         instance.connection.state = STATE_ACTIVE;
+        shared_mem_update_instance();
         return CODE_OK;
     case DOMAIN:
         if (instance.connection.state == STATE_ACTIVE)
@@ -613,22 +608,27 @@ nsh_err_e nsh_instance_init()
     // Spawns additional instances
     nsh_conn_t instances[2] = {0};
     size_t instCnt = 0;
-    if (g_args.domain_sock_path)
+    if (g_args.domain_sock_path || g_args.network)
     {
-        // Prepare domain socket connection
-        nsh_conn_t* inst = &(instances[instCnt++]);
-        inst->type = DOMAIN;
-        strcpy(inst->domain.path, g_args.domain_sock_path);
+        if (g_args.domain_sock_path)
+        {
+            // Prepare domain socket connection
+            nsh_conn_t* inst = &(instances[instCnt++]);
+            inst->type = DOMAIN;
+            strcpy(inst->domain.path, g_args.domain_sock_path);
+        }
+        if (g_args.network)
+        {
+            // Prepare network socket connection
+            nsh_conn_t* inst = &(instances[instCnt++]);
+            inst->type = NETWORK;
+            strcpy(inst->network.ip_to, g_args.ip_address);
+            inst->network.port_to = g_args.port;
+        }
     }
-    if (g_args.network)
-    {
-        // Prepare network socket connection
-        nsh_conn_t* inst = &(instances[instCnt++]);
-        inst->type = NETWORK;
-        strcpy(inst->network.ip_to, g_args.ip_address);
-        inst->network.port_to = g_args.port;
-    }
-
+    else
+        instances[0].state = STATE_ACTIVE;
+        
     instance.connection = instances[0];
     instance.connection.pid = getpid();
 
@@ -777,7 +777,7 @@ void nsh_cleanup()
             shm_unlink(NSH_SHARED_MEM_NAME);
             VERBOSE_LOG("[Shared]: Shared memory cleanup by last exiting instance\n");   
         }
-        else if (instance.connection.type != CONSOLE)
+        else
         {
             // Unregister our instance from shared mem WHERE we're present
             for (size_t i = 0; i < shared_mem->count; i++)

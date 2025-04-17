@@ -61,15 +61,12 @@ nsh_shell_e nsh_command_stat()
             if (conn->state == STATE_ACTIVE)
                 snprintf(msgbuff, 256, "%s:%d -> %s:%d", conn->network.ip_from, conn->network.port_from, conn->network.ip_to, conn->network.port_to);
             else
-                msgbuff[0] = 0;
+                snprintf(msgbuff, 256, "Listening at %s:%d", conn->network.ip_to, conn->network.port_to);
             printf("| %-3.3d | %-6.6s | %-7.7s | %-45.45s |\n", conn->id, state_str, conn_type_str, msgbuff);
         }
         else if (conn->type == DOMAIN)
         {
-            if (conn->state == STATE_ACTIVE)
-                printf("| %-3.3d | %-6.6s | %-7.7s | %-45.45s |\n", conn->id, state_str, conn_type_str, conn->domain.path);
-            else
-                printf("| %-3.3d | %-6.6s | %-7.7s | %-45.45s |\n", conn->id, state_str, conn_type_str, "");
+            printf("| %-3.3d | %-6.6s | %-7.7s | %-45.45s |\n", conn->id, state_str, conn_type_str, conn->domain.path);
         }
         else
         {
@@ -92,10 +89,9 @@ nsh_shell_e nsh_command_abort(int connId)
         if (conn->id == connId) {
             if (conn->pid == getpid())
                 printf("-nsh: Cannot abort your own connection, use 'reset'\n");
-            else {
+            else
                 kill(conn->pid, SIGUSR1);
-                found = true;
-            }
+            found = true;
             break;
         }
     }
@@ -128,6 +124,12 @@ nsh_shell_e nsh_command_close(int connId)
 
 nsh_shell_e nsh_command_halt()
 {
+    if (instance.connection.type != CONSOLE)
+    {
+        printf("-nsh: halt may only be called by console connections\n");
+        return SHELL_OK;
+    }
+
     const pid_t thisPid = getpid();
     pthread_mutex_unlock(&shared_mem->lock);
     pthread_mutex_lock(&shared_mem->lock);
@@ -147,6 +149,58 @@ nsh_shell_e nsh_command_halt()
 
     // Should be unreachable anyway
     return SHELL_EXIT;
+}
+
+static char nsh_exec_native_path_buff[PATH_MAX];
+nsh_shell_e nsh_command_listen(const char* param)
+{
+    int port = atoi(param);
+    printf("[Debug]: decoded port as : %d\n", port);
+    bool valid = false;
+    nsh_conn_t conn = {0};
+    
+    if (port > 0 && port < 65536)
+    {
+        // Valid network port
+        conn.type = NETWORK;
+        if (conn.network.ip_to[0] == 0)
+            strcpy(conn.network.ip_to, NSH_INITIAL_IP_INTERFACE);
+        else
+            strncpy(conn.network.ip_to, instance.connection.network.ip_to, INET_ADDRSTRLEN);
+        conn.network.port_to = port;
+        valid = true;
+    }
+    else
+    {
+        // Maybe it's domain path
+        memset(nsh_exec_native_path_buff, 0, PATH_MAX);
+        char* validPath = realpath(param, nsh_exec_native_path_buff);
+        printf("[Debug]: realpath \"%s\"\n", nsh_exec_native_path_buff);
+        if (strlen(param) < DOMAIN_FILEPATH_LENGTH)
+        {
+            // Valid path for domain sock
+            conn.type = DOMAIN;
+            strcpy(conn.domain.path, param);
+            valid = true;
+        }
+    }
+    if (!valid)
+    {
+        printf("-nsh: Listen has invalid parameter \"%s\"\n", param);
+        return SHELL_OK;
+    }
+
+    pid_t pid = nsh_internal_start_instance(conn);
+    if (pid == 0)
+    {
+        nsh_err_e err = nsh_register_instance();
+        if (err != CODE_OK) nsh_exit((int)err);
+        err = nsh_internal_reset_connection();
+        if (err != CODE_OK) nsh_exit((int)err);
+        err = nsh_instance_accept();
+        if (err != CODE_OK) nsh_exit((int)err);
+    }
+    return SHELL_OK;
 }
 
 nsh_shell_e nsh_exec(char* program, int* exit_code)
@@ -197,7 +251,6 @@ nsh_shell_e nsh_exec(char* program, int* exit_code)
     return SHELL_OK; // This should be unreachable
 }
 
-static char nsh_exec_native_path_buff[PATH_MAX];
 nsh_shell_e nsh_exec_native(nsh_command_t* cmd)
 {
     if (strcmp(cmd->cmd, "quit") == 0)
@@ -258,52 +311,9 @@ nsh_shell_e nsh_exec_native(nsh_command_t* cmd)
             return SHELL_OK;
         }
 
-        nsh_conn_t conn = {0};
-        char* param = *cmd->flags;
-        int port = atoi(param);
-        printf("decoded port as : %d\n", port);
-        bool valid = false;
-        if (port > 0 && port < 65536)
-        {
-            // Valid network port
-            conn.type = NETWORK;
-            if (conn.network.ip_to[0] == 0)
-                strcpy(conn.network.ip_to, NSH_INITIAL_IP_INTERFACE);
-            else
-                strncpy(conn.network.ip_to, instance.connection.network.ip_to, INET_ADDRSTRLEN);
-            conn.network.port_to = port;
-            valid = true;
-        }
-        else
-        {
-            // Maybe it's domain path
-            char* validPath = realpath(param, nsh_exec_native_path_buff);
-            if (validPath && strlen(param) < DOMAIN_FILEPATH_LENGTH)
-            {
-                // Valid path for domain sock
-                conn.type = DOMAIN;
-                strcpy(conn.domain.path, param);
-                valid = true;
-            }
-        }
-        if (!valid)
-        {
-            printf("-nsh: Listen has invalid parameter \"%s\"\n", param);
-            return SHELL_OK;
-        }
+        const char* param = *cmd->flags;
 
-        pid_t pid = nsh_internal_start_instance(conn);
-        if (pid == 0)
-        {
-            nsh_err_e err = nsh_register_instance();
-            if (err != CODE_OK) nsh_exit((int)err);
-            err = nsh_internal_reset_connection();
-            if (err != CODE_OK) nsh_exit((int)err);
-            err = nsh_instance_accept();
-            if (err != CODE_OK) nsh_exit((int)err);
-        }
-
-        return SHELL_OK;
+        return nsh_command_listen(param);
     }
 
     return SHELL_NOT_NATIVE;
