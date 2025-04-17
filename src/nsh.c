@@ -490,7 +490,7 @@ nsh_err_e nsh_client()
     fflush(stdin);
     fflush(stdout);
     setbuf(stdin, NULL);
-    send(client.fd, "\n", 1, 0); // So we get a prompt at the start
+    //send(client.fd, "\n", 1, 0); // So we get a prompt at the start
 
     client.running = true;
     while (client.running)

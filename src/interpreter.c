@@ -42,10 +42,10 @@ nsh_shell_e nsh_command_stat()
     char msgbuff[256];
 
     printf("|=== NSH : Stat =========================================================|\n");
-    printf("| ID  | State  | Type    | Additional info                               |\n");
-    printf("|-----|--------|---------|-----------------------------------------------|\n");
     
     pthread_mutex_lock(&shared_mem->lock);
+    printf("| ID  | State  | Type    | Additional info                               |\n");
+    printf("|-----|--------|---------|-----------------------------------------------|\n");
     for (size_t i = 0; i < shared_mem->count; i++)
     {
         nsh_conn_t* conn = shared_mem->connections + i;
@@ -73,9 +73,10 @@ nsh_shell_e nsh_command_stat()
             printf("| %-3.3d | %-6.6s | %-7.7s | %-45.45s |\n", conn->id, state_str, conn_type_str, "Expect a crash :)");
         }
     }
-    printf("|========================================================================|\n");
-    
     pthread_mutex_unlock(&shared_mem->lock);
+    printf("|========================================================================|\n");
+    //fflush(stdout);
+    
     return SHELL_OK;
 }
 
@@ -151,11 +152,11 @@ nsh_shell_e nsh_command_halt()
     return SHELL_EXIT;
 }
 
-static char nsh_exec_native_path_buff[PATH_MAX];
+//static char nsh_exec_native_path_buff[PATH_MAX];
 nsh_shell_e nsh_command_listen(const char* param)
 {
     int port = atoi(param);
-    printf("[Debug]: decoded port as : %d\n", port);
+    //printf("[Debug]: decoded port as : %d\n", port);
     bool valid = false;
     nsh_conn_t conn = {0};
     
@@ -163,19 +164,16 @@ nsh_shell_e nsh_command_listen(const char* param)
     {
         // Valid network port
         conn.type = NETWORK;
-        if (conn.network.ip_to[0] == 0)
-            strcpy(conn.network.ip_to, NSH_INITIAL_IP_INTERFACE);
-        else
-            strncpy(conn.network.ip_to, instance.connection.network.ip_to, INET_ADDRSTRLEN);
+        strcpy(conn.network.ip_to, g_args.ip_address);
         conn.network.port_to = port;
         valid = true;
     }
     else
     {
         // Maybe it's domain path
-        memset(nsh_exec_native_path_buff, 0, PATH_MAX);
-        char* validPath = realpath(param, nsh_exec_native_path_buff);
-        printf("[Debug]: realpath \"%s\"\n", nsh_exec_native_path_buff);
+        //memset(nsh_exec_native_path_buff, 0, PATH_MAX);
+        //char* validPath = realpath(param, nsh_exec_native_path_buff);
+        //printf("[Debug]: realpath \"%s\"\n", nsh_exec_native_path_buff);
         if (strlen(param) < DOMAIN_FILEPATH_LENGTH)
         {
             // Valid path for domain sock
@@ -480,6 +478,7 @@ loop_end:
         parser_chain_free(&chain);
         chain = parser_advance(NULL, &saveptr1);
     }
+    fflush(stdout);
 
     memset(command_buff, 0, BUFF_SIZE);
     command_buff_size = 0;
