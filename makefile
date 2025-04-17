@@ -34,3 +34,6 @@ sync:
 
 debug: $(PROJECT_EXE)
 	ASAN_OPTIONS=fast_unwind_on_malloc=0:abort_on_error=1 ./$(PROJECT_EXE)
+
+run-server-debug: $(PROJECT_EXE)
+	ASAN_OPTIONS=fast_unwind_on_malloc=0:abort_on_error=1 ./$(PROJECT_EXE) -v -u ~/domain -p 8080

@@ -12,7 +12,7 @@
 int main(int argc, char** argv, char** envp)
 {
     int err = nsh(argc, argv);
-    fprintf(stderr, "Shell exited with %d\n", err);
+    fprintf(stderr, "[Debug]: Shell exited with %d\n", err);
     
     // char buff[1024];
     // while (1)

@@ -45,11 +45,20 @@ char DEBUG_BUFF[DEBUG_BUFF_SIZE];
 
 #define ZERO_MEMORY(var) do { memset(&var, 0, sizeof(var)); } while (0)
 
-/* Various helpers */
+/* Signal land */
+void nsh_sig_abort()
+{
+    VERBOSE_LOG("[Instance]: External abort at connection %d\n", instance.connection.id);
+    if (instance.connection.state == STATE_INACTIVE) return;
+    nsh_internal_reset_connection();
+    nsh_instance_accept();
+}
+
 void nsh_signals_reset()
 {
     signal(SIGINT, SIG_DFL);
     signal(SIGTERM, SIG_DFL);
+    signal(SIGUSR1, SIG_DFL);
 
     // Allow zombies, say Yes! to outbreaks
     struct sigaction sa = {0};
@@ -62,6 +71,7 @@ void nsh_signals_set()
 {
     signal(SIGINT, nsh_exit);
     signal(SIGTERM, nsh_exit);
+    signal(SIGUSR1, nsh_sig_abort);
 
     // Prevent zombies, no outbreaks
     struct sigaction sa = {0};
@@ -321,7 +331,7 @@ void nsh_args_parse(int argc, char** argv)
                     timeout_val = atoi(arg_value);
                     if (timeout_val <= 0) { fprintf(stderr, "Invalid timeout value \"%s\" in seconds\n", arg_value); break; }
                     g_args.timeout = atoi(arg_value);
-                    printf("timeout set to: %d seconds\n", g_args.timeout);
+                    printf("timeout set to: %d milliseconds\n", g_args.timeout);
                     break;
             }
         }
@@ -467,7 +477,10 @@ void nsh_set_terminal_raw()
 void nsh_terminal_restore()
 {
     if (termios_rewritten)
+    {
         tcsetattr(fileno(stdin), TCSANOW, &termios_original);
+        termios_rewritten = false;
+    }
 }
 
 // Takes care of connecting to target specified by args
@@ -716,6 +729,7 @@ nsh_err_e nsh_instance()
         fflush(stdin);
         fflush(stdout);
         nsh_shell_e shErr = nsh_interpreter();
+        fprintf(stderr, "[Debug]: Shell exit with %d\n", shErr);
         if (shErr == SHELL_RESET)
         {
             // We've finished the script, exit
@@ -736,6 +750,7 @@ nsh_err_e nsh_instance()
 /* Flow functions */
 void nsh_cleanup()
 {
+    nsh_signals_reset();
     nsh_terminal_restore();
     if (g_args.client)
     {
@@ -752,6 +767,8 @@ void nsh_cleanup()
         //assert(instance.connection.type != CONSOLE);
         //if (instance.connection.type == CONSOLE) return;
         
+        if (!shared_mem) return;
+
         pid_t us = getpid();
         pthread_mutex_lock(&shared_mem->lock);
         if (shared_mem->count <= 1)
@@ -793,6 +810,7 @@ void nsh_cleanup()
         pthread_mutex_unlock(&shared_mem->lock);
 
         munmap(shared_mem, NSH_SHARED_MEM_SIZE);
+        shared_mem = 0;
         VERBOSE_LOG("[Cleanup]: Instance cleanup\n");
     }
 }

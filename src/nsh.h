@@ -17,7 +17,7 @@
 /* Default config */
 #define NSH_INITIAL_PORT 8888
 #define NSH_INITIAL_IP_INTERFACE "0.0.0.0"
-#define NSH_INITIAL_TIMEOUT 60000
+#define NSH_INITIAL_TIMEOUT -1
 
 #define NSH_MAX_CONNECTIONS_COUNT 64
 #define NSH_CLIENT_BUFFER_SIZE 65536
@@ -104,5 +104,11 @@ void nsh_internal_help();
 
 void nsh_exit(int code);
 int nsh(int argc, char** argv);
+
+pid_t nsh_internal_start_instance(nsh_conn_t conn);
+nsh_err_e nsh_instance_close();
+nsh_err_e nsh_register_instance();
+nsh_err_e nsh_internal_reset_connection();
+nsh_err_e nsh_instance_accept();
 
 #endif

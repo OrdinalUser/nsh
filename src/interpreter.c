@@ -8,6 +8,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <signal.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -81,6 +82,73 @@ nsh_shell_e nsh_command_stat()
     return SHELL_OK;
 }
 
+nsh_shell_e nsh_command_abort(int connId)
+{
+    bool found = false;
+    pthread_mutex_lock(&shared_mem->lock);
+    for (size_t i = 0; i < shared_mem->count; i++)
+    {
+        nsh_conn_t* conn = shared_mem->connections + i;
+        if (conn->id == connId) {
+            if (conn->pid == getpid())
+                printf("-nsh: Cannot abort your own connection, use 'reset'\n");
+            else {
+                kill(conn->pid, SIGUSR1);
+                found = true;
+            }
+            break;
+        }
+    }
+    pthread_mutex_unlock(&shared_mem->lock);
+    if (!found) printf("-nsh: Failed to find connection with ID %d\n", connId);
+    return SHELL_OK;
+}
+
+nsh_shell_e nsh_command_close(int connId)
+{
+    bool found = false;
+    pthread_mutex_lock(&shared_mem->lock);
+    for (size_t i = 0; i < shared_mem->count; i++)
+    {
+        nsh_conn_t* conn = shared_mem->connections + i;
+        if (conn->id == connId) {
+            if (conn->pid == getpid())
+                printf("-nsh: Cannot close your own connection, use 'quit'\n");
+            else {
+                found = true;
+                kill(conn->pid, SIGTERM);
+            }
+            break;
+        }
+    }
+    pthread_mutex_unlock(&shared_mem->lock);
+    if (!found) printf("-nsh: Failed to find connection with ID %d\n", connId);
+    return SHELL_OK;
+}
+
+nsh_shell_e nsh_command_halt()
+{
+    const pid_t thisPid = getpid();
+    pthread_mutex_unlock(&shared_mem->lock);
+    pthread_mutex_lock(&shared_mem->lock);
+    for (size_t i = 0; i < shared_mem->count; i++)
+    {
+        nsh_conn_t* conn = shared_mem->connections + i;
+        if (conn->pid == thisPid) continue;
+        kill(conn->pid, SIGTERM);
+    }
+    pthread_mutex_unlock(&shared_mem->lock);
+    
+    shm_unlink(NSH_SHARED_MEM_NAME);
+    munmap(shared_mem, NSH_SHARED_MEM_SIZE);
+    shared_mem = 0;
+    
+    nsh_exit(0);
+
+    // Should be unreachable anyway
+    return SHELL_EXIT;
+}
+
 nsh_shell_e nsh_exec(char* program, int* exit_code)
 {
     pid_t pid, wpid;
@@ -129,6 +197,7 @@ nsh_shell_e nsh_exec(char* program, int* exit_code)
     return SHELL_OK; // This should be unreachable
 }
 
+static char nsh_exec_native_path_buff[PATH_MAX];
 nsh_shell_e nsh_exec_native(nsh_command_t* cmd)
 {
     if (strcmp(cmd->cmd, "quit") == 0)
@@ -151,6 +220,89 @@ nsh_shell_e nsh_exec_native(nsh_command_t* cmd)
     }
     else if (strcmp(cmd->cmd, "help") == 0) {
         nsh_internal_help();
+        return SHELL_OK;
+    }
+    else if (strcmp(cmd->cmd, "halt") == 0) {
+        nsh_command_halt();
+        // Shouldn't return anyway..
+        return SHELL_OK;
+    }
+    else if (strcmp(cmd->cmd, "abort") == 0) {
+        if (*cmd->flags == NULL)
+        {
+            printf("-nsh: Abort has no connection ID to terminate\n");
+            return SHELL_OK;
+        }
+        
+        int abortPid = atoi(*cmd->flags);
+        nsh_command_abort(abortPid);
+
+        return SHELL_OK;
+    }
+    else if (strcmp(cmd->cmd, "close") == 0) {
+        if (*cmd->flags == NULL)
+        {
+            printf("-nsh: Close has no connection ID to terminate\n");
+            return SHELL_OK;
+        }
+        
+        int abortPid = atoi(*cmd->flags);
+        nsh_command_close(abortPid);
+
+        return SHELL_OK;
+    }
+    else if (strcmp(cmd->cmd, "listen") == 0) {
+        if (*cmd->flags == NULL)
+        {
+            printf("-nsh: Listen is missing parameter\n");
+            return SHELL_OK;
+        }
+
+        nsh_conn_t conn = {0};
+        char* param = *cmd->flags;
+        int port = atoi(param);
+        printf("decoded port as : %d\n", port);
+        bool valid = false;
+        if (port > 0 && port < 65536)
+        {
+            // Valid network port
+            conn.type = NETWORK;
+            if (conn.network.ip_to[0] == 0)
+                strcpy(conn.network.ip_to, NSH_INITIAL_IP_INTERFACE);
+            else
+                strncpy(conn.network.ip_to, instance.connection.network.ip_to, INET_ADDRSTRLEN);
+            conn.network.port_to = port;
+            valid = true;
+        }
+        else
+        {
+            // Maybe it's domain path
+            char* validPath = realpath(param, nsh_exec_native_path_buff);
+            if (validPath && strlen(param) < DOMAIN_FILEPATH_LENGTH)
+            {
+                // Valid path for domain sock
+                conn.type = DOMAIN;
+                strcpy(conn.domain.path, param);
+                valid = true;
+            }
+        }
+        if (!valid)
+        {
+            printf("-nsh: Listen has invalid parameter \"%s\"\n", param);
+            return SHELL_OK;
+        }
+
+        pid_t pid = nsh_internal_start_instance(conn);
+        if (pid == 0)
+        {
+            nsh_err_e err = nsh_register_instance();
+            if (err != CODE_OK) nsh_exit((int)err);
+            err = nsh_internal_reset_connection();
+            if (err != CODE_OK) nsh_exit((int)err);
+            err = nsh_instance_accept();
+            if (err != CODE_OK) nsh_exit((int)err);
+        }
+
         return SHELL_OK;
     }
 
@@ -343,8 +495,9 @@ int nsh_interpreter()
         fds[0].events = POLLIN | POLLHUP | POLLERR | POLLNVAL;
 
         int ret = poll(fds, 1, g_args.timeout);
-        if (ret == -1 || ret == 0) break;
-        if (fds[0].revents & POLLHUP || fds[0].revents & POLLERR || fds[0].revents & POLLNVAL) break;
+        if (ret == 0) return SHELL_RESET; // Timedout
+        if (ret == -1) return SHELL_POLL_FAIL; // Possibly external abort
+        if (fds[0].revents & POLLHUP || fds[0].revents & POLLERR || fds[0].revents & POLLNVAL) return 8;
 
         ssize_t readBytes = read(fileno(stdin), buff, BUFF_SIZE);
         

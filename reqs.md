@@ -34,7 +34,7 @@ Deadline: 9. cvicenie - tbd - TODO
 ## Other
 Spracovanie argumentov, spracovanie zadaneho vstupneho riadku, interne prikazy
 + help
-- halt
++ halt
 + quit
 ## Program management
 Overenie cinnosti a spusutenie zadanych prikazov, presmerovanie
@@ -60,7 +60,7 @@ sokety, spojenia // thanks for being specific yet again
 |-|-|-|
 + | 1. | 2 | Neinteraktívny režim - "shell" bude spracovávať aj príkazy v zadaných súboroch (skript).
 + | 3. | 3 | Interný príkaz stat vypíše zoznam všetkých aktuálnych spojení na ktorých prijíma príkazy, prípadne aj všetky sokety na ktorých prijíma nové spojenia.
-| 4. | 2 | Interný príkaz abort n ukončí zadané spojenie.
++ | 4. | 2 | Interný príkaz abort n ukončí zadané spojenie.
 | 5. | 4 | Interné príkazy listen a close (s príslušnými argumentami) pre otvorenie a zatvorenie soketu pre prijímanie spojení.
 + | 7. | 2 | S prepínačom "-i" bude možné zadať aj IP adresu na ktorej bude program očakávať spojenia (nielen port).
 + | 12. | 5 | Ak je niektoré spojenie nečinné zadanú dobu, bude zrušené.
