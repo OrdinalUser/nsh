@@ -55,7 +55,7 @@ nsh_command_chain_t parser_advance(char* command, char** saveptr)
         }
         tok = lexer_advance(NULL, saveptr, &cmdFlag);
     }
-    //printf("<last token> tok: %s - %s\n", nsh_lexer_enum_str(tok.type), tok.value);
+    // printf("<last token> tok: %s - %s\n", nsh_lexer_enum_str(tok.type), tok.value);
     
     nsh_command_chain_t chain = {.commands = cmds.base, .count = cmds.length};
     return chain;
