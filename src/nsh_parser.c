@@ -11,7 +11,9 @@
 #include <unistd.h>
 
 const char* nsh_native_commands[] = {
-    "quit", "reset", "cd", "stat", "help", "halt", "abort", "close", "listen", "purge", "exit"
+    "quit", "reset", "cd", "stat",
+    "help", "halt", "abort", "close",
+    "listen", "purge", "exit"
 };
 
 nsh_command_chain_t parser_advance(char* command, char** saveptr)

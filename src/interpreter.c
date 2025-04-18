@@ -128,6 +128,25 @@ nsh_shell_e nsh_command_close(int connId)
     return SHELL_OK;
 }
 
+nsh_shell_e nsh_command_help()
+{
+    printf("Network SHell\n> Author: Tomas Tytykalo\n> Good luck using this :/\n");
+    printf("Native commands:\n");
+    printf("\thelp | Help screen\n");
+    printf("\tcd   | Change directory\n");
+    printf("\tquit | Closes this connection\n");
+    printf("\texit | Alias for quit\n");
+    printf("NSH - specific\n");
+    printf("\treset                   | Disconnects client, but connection persists\n");
+    printf("\tstat                    | List all active NSH connections\n");
+    printf("\tabort <conn_id>         | Resets target connection\n");
+    printf("\tclose <conn_id>         | Closes target connection\n");
+    printf("\tpurge <conn_id>         | Forceful removal of target connection\n");
+    printf("\tlisten <port> or <file> | Opens a new network or domain connection\n");
+    printf("\thalt                    | Attempts to close all connections and clean up shared memory\n");
+    return SHELL_OK;
+}
+
 int try_acquire_mutex_with_timeout(pthread_mutex_t* mutex, int timeout_sec) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
@@ -335,7 +354,7 @@ nsh_shell_e nsh_exec_native(nsh_command_t* cmd)
         return SHELL_OK;
     }
     else if (strcmp(cmd->cmd, "help") == 0) {
-        nsh_internal_help();
+        nsh_command_help();
         return SHELL_OK;
     }
     else if (strcmp(cmd->cmd, "halt") == 0) {

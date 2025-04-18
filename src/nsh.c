@@ -113,6 +113,15 @@ void shared_mem_update_instance()
 void nsh_internal_help()
 {
     printf("Network SHell\n> Author: Tomas Tytykalo\n> Good luck using this :/\n");
+    printf("Flags:\n");
+    printf("\t-h           | Help screen\n");
+    printf("\t-t <milli>   | Timeout in milliseconds, default is -1\n");
+    printf("\t-v           | Verbose logging, shows bunch of things that NSH is doing\n");
+    printf("\t-i <ip_addr> | IP interface, ip address to bind or to connect to\n");
+    printf("\t-p <port>    | Application port, port to listen on or to connect to\n");
+    printf("\t-c           | Client flag, makes NSH act as a client to connect remotely\n");
+    printf("\t-l <file>    | Log file, redirects all stderr into this file\n");
+    printf("\t-u <file>    | Domain socket path, to bind or to connect to\n");
 }
 
 /* Internal functions */

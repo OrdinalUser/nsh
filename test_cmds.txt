@@ -1,1 +1,2 @@
+# Prints lines of code for this project file
 find -type f -name *.c -or -name *.h | xargs wc -l | sort -n -r
