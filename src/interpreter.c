@@ -10,6 +10,8 @@
 #include <fcntl.h>
 #include <signal.h>
 
+#include <errno.h>
+
 #include <time.h>
 #include <stdio.h>
 #include <string.h>
@@ -126,6 +128,17 @@ nsh_shell_e nsh_command_close(int connId)
     return SHELL_OK;
 }
 
+int try_acquire_mutex_with_timeout(pthread_mutex_t* mutex, int timeout_sec) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += timeout_sec;
+
+    int res = pthread_mutex_timedlock(mutex, &ts);
+    if (res == 0) return 0;
+    else if (res == ETIMEDOUT) return 1;
+    else return -1;
+}
+
 nsh_shell_e nsh_command_halt()
 {
     if (instance.connection.type != CONSOLE)
@@ -135,14 +148,25 @@ nsh_shell_e nsh_command_halt()
     }
 
     const pid_t thisPid = getpid();
-    pthread_mutex_unlock(&shared_mem->lock);
-    pthread_mutex_lock(&shared_mem->lock);
+
+    // Contingency nuke:
+    //      Assuming no one else cares and we destroy the shared_memory anyway
+    //      killing anyone and everyone mentioned with a name on the death list
+
+    for (size_t niceAttempts = 0; niceAttempts < 3; niceAttempts++)
+    {
+        int res = try_acquire_mutex_with_timeout(&shared_mem->lock, 1);
+        if (res != 0)
+            pthread_mutex_unlock(&shared_mem->lock);
+    }
+    
     for (size_t i = 0; i < shared_mem->count; i++)
     {
         nsh_conn_t* conn = shared_mem->connections + i;
         if (conn->pid == thisPid) continue;
         kill(conn->pid, SIGTERM);
     }
+    // This has no reason to be here, but we're professionals, right?
     pthread_mutex_unlock(&shared_mem->lock);
     
     shm_unlink(NSH_SHARED_MEM_NAME);
