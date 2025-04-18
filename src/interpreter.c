@@ -117,6 +117,7 @@ nsh_shell_e nsh_command_close(int connId)
                 found = true;
                 kill(conn->pid, SIGTERM);
             }
+            found = true;
             break;
         }
     }
@@ -152,6 +153,44 @@ nsh_shell_e nsh_command_halt()
 
     // Should be unreachable anyway
     return SHELL_EXIT;
+}
+
+nsh_shell_e nsh_command_purge(int connId)
+{
+    pthread_mutex_lock(&shared_mem->lock);
+
+    if (shared_mem->count >= 1)
+    {
+        // Unregister our instance from shared mem WHERE we're present
+        for (size_t i = 0; i < shared_mem->count; i++)
+        {
+            nsh_conn_t* conn = shared_mem->connections + i;
+            int procId = conn->pid;
+            if (conn->id == connId)
+            {
+                nsh_conn_t* last = shared_mem->connections + shared_mem->count - 1;
+                if (conn == last)
+                {
+                    // Zero out our entry if we're the last entry
+                    //printf("deleting record id %d pid %d\n", conn->id, conn->pid);
+                    memset(conn, 0, sizeof(nsh_conn_t));
+                    //VERBOSE_LOG("[Log]: Deleting shared record for %d owned by %d\n", conn->id, conn->pid);
+                    shared_mem->count--;
+                }
+                else
+                {
+                    // Found our entry, move last entry into our position
+                    // effectively deleting ours and keeping the array dense
+                    //VERBOSE_LOG("[Log]: Deleting shared record for %d owned by %d\n", conn->id, conn->pid);
+                    memcpy(conn, last, sizeof(nsh_conn_t));
+                    shared_mem->count--;
+                }
+                kill(procId, SIGTERM);
+            }
+        }
+    }
+    pthread_mutex_unlock(&shared_mem->lock);
+    return SHELL_OK;
 }
 
 //static char nsh_exec_native_path_buff[PATH_MAX];
@@ -253,7 +292,7 @@ nsh_shell_e nsh_exec(char* program, int* exit_code)
 
 nsh_shell_e nsh_exec_native(nsh_command_t* cmd)
 {
-    if (strcmp(cmd->cmd, "quit") == 0)
+    if (strcmp(cmd->cmd, "quit") == 0 || strcmp(cmd->cmd, "exit") == 0)
         { state.running = false; return SHELL_EXIT; }
     else if (strcmp(cmd->cmd, "reset") == 0)
         { state.running = false; return SHELL_RESET; }
@@ -287,8 +326,8 @@ nsh_shell_e nsh_exec_native(nsh_command_t* cmd)
             return SHELL_OK;
         }
         
-        int abortPid = atoi(*cmd->flags);
-        nsh_command_abort(abortPid);
+        int connId = atoi(*cmd->flags);
+        nsh_command_abort(connId);
 
         return SHELL_OK;
     }
@@ -314,6 +353,21 @@ nsh_shell_e nsh_exec_native(nsh_command_t* cmd)
         const char* param = *cmd->flags;
 
         return nsh_command_listen(param);
+    }
+    else if (strcmp(cmd->cmd, "purge") == 0) {
+        if (*cmd->flags == NULL)
+        {
+            printf("-nsh: Purge has no connection ID to terminate\n");
+            return SHELL_OK;
+        }
+        
+        int connId = atoi(*cmd->flags);
+        if (connId == instance.connection.id)
+            printf("-nsh: Cannot purge your own connection, use 'quit'\n");
+        else
+            nsh_command_purge(connId);
+
+        return SHELL_OK;
     }
 
     return SHELL_NOT_NATIVE;
@@ -535,8 +589,15 @@ int nsh_interpreter()
 
         int ret = poll(fds, 1, g_args.timeout);
         if (ret == 0) return SHELL_RESET; // Timedout
-        if (ret == -1) return SHELL_POLL_FAIL; // Possibly external abort
-        if (fds[0].revents & POLLHUP || fds[0].revents & POLLERR || fds[0].revents & POLLNVAL) return 8;
+        if (ret == -1) {
+            if (instance.got_aborted) {
+                // Possibly external abort, ignore once
+                instance.got_aborted = false;
+                return SHELL_POLL_FAIL;
+            }
+            return SHELL_EXIT;
+        };
+        if (fds[0].revents & POLLHUP || fds[0].revents & POLLERR || fds[0].revents & POLLNVAL) return SHELL_EXIT;
 
         ssize_t readBytes = read(fileno(stdin), buff, BUFF_SIZE);
         
@@ -550,7 +611,8 @@ int nsh_interpreter()
                 {
                     command_buff[command_buff_size] = '\0';
                     nsh_shell_e err = nsh_run_command(command_buff);
-                    if (err != SHELL_OK) { printf("shell err: %d\n", err); return err; }
+                    //if (err != SHELL_OK) { printf("shell err: %d\n", err); return err; }
+                    if (err != SHELL_OK) return err;
 
                     // getcwd(temp_buff, BUFF_SIZE);
                     

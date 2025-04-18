@@ -52,6 +52,7 @@ void nsh_sig_abort()
     if (instance.connection.state == STATE_INACTIVE) return;
     nsh_internal_reset_connection();
     nsh_instance_accept();
+    instance.got_aborted = true;
 }
 
 void nsh_signals_reset()
@@ -271,7 +272,7 @@ void nsh_args_parse(int argc, char** argv)
             switch(*(arg+1))
             {
                 case 'h':
-                    printf("Help\n");
+                    if (g_args.verbose) printf("Help\n");
                     g_args.help = true;
                     break;
                 case 'v':
@@ -283,7 +284,7 @@ void nsh_args_parse(int argc, char** argv)
                     arg_value = argv[++argi];
                     g_args.ip_address = arg_value;
                     if (inet_pton(AF_INET, arg_value, &ip4) != 1) { fprintf(stderr, "Invalid IP address \"%s\"\n", arg_value); break; }
-                    printf("ip address: %s\n", arg_value);
+                    if (g_args.verbose) printf("ip address: %s\n", arg_value);
                     g_args.network = true;
                     break;
                 case 'p':
@@ -293,11 +294,11 @@ void nsh_args_parse(int argc, char** argv)
                     if (port_val == 0 || port_val > 65535) { fprintf(stderr, "Invalid port number \"%s\" doesn't belong in range (0, 65536)\n", arg_value); break; }
                     g_args.port = port_val;
                     g_args.network = true;
-                    printf("network port: %d\n", port_val);
+                    if (g_args.verbose) printf("network port: %d\n", port_val);
                     break;
                 case 'c':
                     g_args.client = true;
-                    printf("client mode set\n");
+                    if (g_args.verbose) printf("client mode set\n");
                     break;
                 case 'l':
                     if (argi+1 >= argc || *argv[argi+1] == '-') { fprintf(stderr, "Missing value after %s flag\n", arg); break; }
@@ -309,7 +310,7 @@ void nsh_args_parse(int argc, char** argv)
                     }
                     fclose(temp_fd);
                     g_args.log_file = arg_value;
-                    printf("log file: %s\n", arg_value);
+                    if (g_args.verbose) printf("log file: %s\n", arg_value);
                     break;
                 case 'u':
                     if (argi+1 >= argc || *argv[argi+1] == '-') { fprintf(stderr, "Missing value after %s flag\n", arg); break; }
@@ -320,7 +321,7 @@ void nsh_args_parse(int argc, char** argv)
                         break;
                     }
                     g_args.domain_sock_path = arg_value;
-                    printf("domain socket: %s\n", g_args.domain_sock_path);
+                    if (g_args.verbose) printf("domain socket: %s\n", g_args.domain_sock_path);
                     break;
                 case 't':
                     if (argi+1 >= argc || *argv[argi+1] == '-') { fprintf(stderr, "Missing value after %s flag\n", arg); break; }
@@ -328,7 +329,7 @@ void nsh_args_parse(int argc, char** argv)
                     timeout_val = atoi(arg_value);
                     if (timeout_val <= 0) { fprintf(stderr, "Invalid timeout value \"%s\" in seconds\n", arg_value); break; }
                     g_args.timeout = atoi(arg_value);
-                    printf("timeout set to: %d milliseconds\n", g_args.timeout);
+                    if (g_args.verbose) printf("timeout set to: %d milliseconds\n", g_args.timeout);
                     break;
             }
         }
@@ -340,12 +341,16 @@ void nsh_args_parse(int argc, char** argv)
                 realpath(argv[argi], g_args.script_file);
                 if (stat(g_args.script_file, &stats) == 0)
                 {
-                    if (S_ISREG(stats.st_mode)) fprintf(stderr, "Treating \"%s\" as a script file\n", g_args.script_file);
-                    else fprintf(stderr, "Script file \"%s\" is not a regular file\n", g_args.script_file);
+                    if (g_args.verbose)
+                    {
+                        if (S_ISREG(stats.st_mode)) fprintf(stderr, "Treating \"%s\" as a script file\n", g_args.script_file);
+                        else fprintf(stderr, "Script file \"%s\" is not a regular file\n", g_args.script_file);
+                    }
                 }
                 else
                 {
-                    fprintf(stderr, "Script file \"%s\" doesn't exist or cannot access\n", g_args.script_file);
+                    if (g_args.verbose)
+                        fprintf(stderr, "Script file \"%s\" doesn't exist or cannot access\n", g_args.script_file);
                     memset(g_args.script_file, 0, PATH_MAX);
                 }
             }
@@ -731,7 +736,7 @@ nsh_err_e nsh_instance()
         fflush(stdin);
         fflush(stdout);
         nsh_shell_e shErr = nsh_interpreter();
-        fprintf(stderr, "[Debug]: Shell exit with %d\n", shErr);
+        //fprintf(stderr, "[Debug]: Shell exit with %d\n", shErr);
         if (shErr == SHELL_RESET)
         {
             // We've finished the script, exit

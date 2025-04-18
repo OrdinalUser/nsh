@@ -98,6 +98,7 @@ struct nsh_instance_state
 {
     nsh_conn_t connection;
     int sock_fd;
+    volatile bool got_aborted;
 };
 
 void nsh_internal_help();
